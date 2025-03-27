@@ -1,8 +1,8 @@
 import requests
 import csv
 from flask import Flask, request, jsonify, send_file
-from auth import get_valid_access_token, get_access_token  # Import from auth.py
-from config import EMAIL_SEND_ENDPOINT, EMAIL_ASSET_ENDPOINT, EMAIL_ACTIVITY_ENDPOINT, AUTH_URL
+from auth import get_valid_access_token, get_access_token
+from config import *
 
 app = Flask(__name__)
 
@@ -24,7 +24,7 @@ def callback():
     return jsonify(token_info)
 
 def fetch_data(endpoint):
-    """Fetch data from Eloqua API given an endpoint."""
+    """Helper function to fetch data from Eloqua API"""
     access_token = get_valid_access_token()
     if not access_token:
         return {"error": "Authorization required. Please re-authenticate."}
@@ -33,125 +33,111 @@ def fetch_data(endpoint):
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/json"
     }
-
     response = requests.get(endpoint, headers=headers)
 
     if response.status_code == 200:
-        return response.json()  # Return raw data
+        return response.json()
     else:
-        return {"error": f"Failed to fetch data from {endpoint}", "details": response.text}
+        return {"error": "Failed to fetch data", "details": response.text}
 
-def process_email_sends(data):
-    """Extract relevant fields from Email Sends response."""
-    if "error" in data:
-        return data
-
-    return [
-        {
-            "Email Send ID": record.get("emailSendID"),
-            "Campaign ID": record.get("eloquaCampaignID"),
-            "Account ID": record.get("accountID"),
-            "Contact ID": record.get("contactID"),
-            "Email ID": record.get("emailID"),
-            "Segment ID": record.get("segmentID"),
-            "Sent Date Hour": record.get("sentDateHour"),
-        }
-        for record in data.get("value", [])
-    ]
-
-def process_email_assets(data):
-    """Extract relevant fields from Email Assets response."""
-    if "error" in data:
-        return data
-
-    return [
-        {
-            "Email ID": record.get("emailID"),
-            "Email Name": record.get("emailName"),
-            "Email Subject Line": record.get("subjectLine"),
-            "Last Modified Date": record.get("lastModifiedDate"),
-            "Created By User ID": record.get("emailCreatedByUserID"),
-            "Email Group": record.get("emailGroup"),
-            "Email Group ID": record.get("emailGroupID"),
-            "Email Group Description": record.get("emailGroupDescription"),
-            "Email Group Is Deleted": record.get("emailGroupIsDeleted"),
-            "Is Archived": record.get("isArchived"),
-            "Is Deleted": record.get("isDeleted"),
-        }
-        for record in data.get("value", [])
-    ]
-
-def process_email_activities(data):
-    """Extract relevant fields from Email Activities response."""
-    if "error" in data:
-        return data
-
-    return [
-        {
-            "openRate": float(record.get("openRate") or 0.0),
-            "clickthroughRate": float(record.get("clickthroughRate") or 0.0),
-            "clickToOpenRate": float(record.get("clickToOpenRate") or 0.0),
-            "emailSentAggKey": int(record.get("emailSentAggKey") or 0),
-            "eloquaCampaignId": int(record.get("eloquaCampaignId") or 0),
-            "emailId": int(record.get("emailId") or 0),
-            "segmentId": int(record.get("segmentId") or 0),
-            "dateHour": str(record.get("dateHour") or ""),
-            "lastModifiedDate": str(record.get("lastModifiedDate") or ""),
-            "totalSends": int(record.get("totalSends") or 0),
-            "totalDelivered": int(record.get("totalDelivered") or 0),
-            "totalHardBouncebacks": int(record.get("totalHardBouncebacks") or 0),
-            "totalSoftBouncebacks": int(record.get("totalSoftBouncebacks") or 0),
-            "totalOpens": int(record.get("totalOpens") or 0),
-            "totalClickthroughs": int(record.get("totalClickthroughs") or 0),
-            "totalPossibleForwarders": int(record.get("totalPossibleForwarders") or 0),
-            "totalUnsubscribesbyEmail": int(record.get("totalUnsubscribesbyEmail") or 0),
-            "totalBouncebacks": int(record.get("totalBouncebacks") or 0),
-            "totalSpamUnsubscribersByEmail": int(record.get("totalSpamUnsubscribersByEmail") or 0),
-            "existingVisitorClickthroughs": int(record.get("existingVisitorClickthroughs") or 0),
-            "newVisitorClickthroughs": int(record.get("newVisitorClickthroughs") or 0),
-            "isOpened": int(record.get("isOpened") or 0),
-            "isClickThroughed": int(record.get("isClickThroughed") or 0),
-            "segment": record.get("segment") or {},
-            "campaign": record.get("campaign") or {},
-            "calendar": record.get("calendar") or {},
-            "emailAsset": record.get("emailAsset") or {},
-        }
-        for record in data.get("value", [])
-    ]
-
-def save_data_as_csv(data, filename="report.csv"):
-    """Save processed data to a CSV file."""
-    keys = data[0].keys() if data else []
-    with open(filename, mode="w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=keys)
-        writer.writeheader()
-        for row in data:
-            writer.writerow(row)
-    return filename
+def process_email_sends(raw_data):
+    """Processes email send data into a structured format"""
+    report_data = []
+    for record in raw_data.get("value", []):
+        report_data.append({
+            "Email Name": record.get("emailName", ""),
+            "Email ID": record.get("emailID", ""),
+            "Email Subject Line": record.get("subjectLine", ""),
+            "Last Activated by User": record.get("lastModifiedByUser", ""),
+            "Total Delivered": record.get("totalDelivered", 0),
+            "Total Hard Bouncebacks": record.get("totalHardBouncebacks", 0),
+            "Total Sends": record.get("totalSends", 0),
+            "Total Soft Bouncebacks": record.get("totalSoftBouncebacks", 0),
+            "Total Bouncebacks": record.get("totalBouncebacks", 0),
+            "Unique Opens": record.get("totalUniqueOpens", 0),
+            "Hard Bounceback Rate": record.get("hardBouncebackRate", 0.0),
+            "Soft Bounceback Rate": record.get("softBouncebackRate", 0.0),
+            "Bounceback Rate": record.get("bouncebackRate", 0.0),
+            "Clickthrough Rate": record.get("clickthroughRate", 0.0),
+            "Unique Clickthrough Rate": record.get("uniqueClickthroughRate", 0.0),
+            "Delivered Rate": record.get("deliveredRate", 0.0),
+            "Unique Open Rate": record.get("uniqueOpenRate", 0.0),
+            "Email Group": record.get("emailGroup", ""),
+            "Email Send Date": record.get("emailSendDate", ""),
+            "Email Address": record.get("emailAddress", ""),
+            "Contact Country": record.get("contactCountry", ""),
+            "HP Role": record.get("hpRole", ""),
+            "HP Partner Id": record.get("hpPartnerId", ""),
+            "Partner Name": record.get("partnerName", ""),
+            "Market": record.get("market", ""),
+        })
+    return report_data
 
 @app.route("/email-sends", methods=["GET"])
 def get_email_sends():
-    """API endpoint to fetch, process, and return Email Sends data as CSV."""
+    """Fetch Email Sends data and return as CSV"""
     raw_data = fetch_data(EMAIL_SEND_ENDPOINT)
     processed_data = process_email_sends(raw_data)
     filename = save_data_as_csv(processed_data, "email_sends.csv")
     return send_file(filename, as_attachment=True)
 
-@app.route("/email-assets", methods=["GET"])
-def get_email_assets():
-    """API endpoint to fetch, process, and return Email Assets data as CSV."""
-    raw_data = fetch_data(EMAIL_ASSET_ENDPOINT)
-    processed_data = process_email_assets(raw_data)
-    filename = save_data_as_csv(processed_data, "email_assets.csv")
+@app.route("/monthly-report", methods=["GET"])
+def generate_monthly_report():
+    """Generate a monthly report combining all email-related data"""
+    
+    # Fetch data from all endpoints
+    email_sends = fetch_data(EMAIL_SEND_ENDPOINT)
+    email_assets = fetch_data(EMAIL_ASSET_ENDPOINT)
+    email_activities = fetch_data(EMAIL_ACTIVITY_ENDPOINT)
+
+    report_data = []
+    
+    # Process data and merge into the final report format
+    for send in email_sends.get("value", []):
+        email_id = send.get("emailID")
+        email_asset = next((ea for ea in email_assets.get("value", []) if ea.get("emailID") == email_id), {})
+        email_activity = next((ea for ea in email_activities.get("value", []) if ea.get("emailId") == email_id), {})
+
+        report_data.append({
+            "Email Name": email_asset.get("emailName", ""),
+            "Email ID": email_id,
+            "Email Subject Line": email_asset.get("subjectLine", ""),
+            "Last Activated by User": email_asset.get("emailCreatedByUserID", ""),
+            "Total Delivered": email_activity.get("totalDelivered", 0),
+            "Total Hard Bouncebacks": email_activity.get("totalHardBouncebacks", 0),
+            "Total Sends": email_activity.get("totalSends", 0),
+            "Total Soft Bouncebacks": email_activity.get("totalSoftBouncebacks", 0),
+            "Total Bouncebacks": email_activity.get("totalBouncebacks", 0),
+            "Unique Opens": email_activity.get("totalOpens", 0),
+            "Hard Bounceback Rate": email_activity.get("openRate", 0.0),
+            "Soft Bounceback Rate": email_activity.get("clickthroughRate", 0.0),
+            "Bounceback Rate": email_activity.get("clickToOpenRate", 0.0),
+            "Clickthrough Rate": email_activity.get("clickthroughRate", 0.0),
+            "Unique Clickthrough Rate": email_activity.get("clickToOpenRate", 0.0),
+            "Delivered Rate": email_activity.get("totalDelivered", 0),
+            "Unique Open Rate": email_activity.get("totalOpens", 0),
+            "Email Group": email_asset.get("emailGroup", ""),
+            "Email Send Date": send.get("sentDateHour", ""),
+            "Email Address": send.get("emailAddress", ""),
+            "Contact Country": send.get("contactCountry", ""),
+            "HP Role": send.get("hpRole", ""),
+            "HP Partner Id": send.get("hpPartnerId", ""),
+            "Partner Name": send.get("partnerName", ""),
+            "Market": send.get("market", ""),
+        })
+
+    # Save report as CSV
+    filename = save_data_as_csv(report_data, "monthly_report.csv")
     return send_file(filename, as_attachment=True)
 
-@app.route("/email-activities", methods=["GET"])
-def get_email_activities():
-    """API endpoint to fetch, process, and return Email Activities data as CSV."""
-    raw_data = fetch_data(EMAIL_ACTIVITY_ENDPOINT)
-    processed_data = process_email_activities(raw_data)
-    filename = save_data_as_csv(processed_data, "email_activities.csv")
-    return send_file(filename, as_attachment=True)
+def save_data_as_csv(data, filename):
+    """Save data to CSV file"""
+    keys = data[0].keys() if data else []
+    with open(filename, "w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(data)
+    return filename
 
 if __name__ == "__main__":
-    app.run(port=5000)
+    app.run(port=5000, debug=True)
