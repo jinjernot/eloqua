@@ -2,7 +2,7 @@ import requests
 import csv
 from flask import Flask, request, jsonify, send_file
 from auth import get_valid_access_token, get_access_token
-from config import *
+from config import EMAIL_SEND_ENDPOINT, AUTH_URL, EMAIL_ASSET_ENDPOINT
 
 app = Flask(__name__)
 
@@ -88,7 +88,7 @@ def generate_monthly_report():
     # Fetch data from all endpoints
     email_sends = fetch_data(EMAIL_SEND_ENDPOINT)
     email_assets = fetch_data(EMAIL_ASSET_ENDPOINT)
-    email_activities = fetch_data(EMAIL_ACTIVITY_ENDPOINT)
+    email_activities = fetch_data("https://secure.p06.eloqua.com/API/OData/CampaignAnalysis/1/EmailActivities")
 
     report_data = []
     
