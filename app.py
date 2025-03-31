@@ -1,8 +1,9 @@
 import requests
 import csv
+import json
 from flask import Flask, request, jsonify, send_file
 from auth import get_valid_access_token, get_access_token
-from config import EMAIL_SEND_ENDPOINT, AUTH_URL, EMAIL_ASSET_ENDPOINT
+from config import EMAIL_SEND_ENDPOINT, EMAIL_ASSET_ENDPOINT, CONTACTS_ENDPOINT, AUTH_URL,EMAIL_ACTIVITY_ENDPOINT
 
 app = Flask(__name__)
 
@@ -23,8 +24,8 @@ def callback():
 
     return jsonify(token_info)
 
-def fetch_data(endpoint):
-    """Helper function to fetch data from Eloqua API"""
+def fetch_data(endpoint, filename):
+    """Helper function to fetch data from Eloqua API and save as JSON."""
     access_token = get_valid_access_token()
     if not access_token:
         return {"error": "Authorization required. Please re-authenticate."}
@@ -36,67 +37,59 @@ def fetch_data(endpoint):
     response = requests.get(endpoint, headers=headers)
 
     if response.status_code == 200:
-        return response.json()
+        data = response.json()
+        # Save raw response to JSON
+        with open(filename, "w", encoding="utf-8") as json_file:
+            json.dump(data, json_file, ensure_ascii=False, indent=4)
+        return data
     else:
         return {"error": "Failed to fetch data", "details": response.text}
 
-def process_email_sends(raw_data):
-    """Processes email send data into a structured format"""
-    report_data = []
-    for record in raw_data.get("value", []):
-        report_data.append({
-            "Email Name": record.get("emailName", ""),
-            "Email ID": record.get("emailID", ""),
-            "Email Subject Line": record.get("subjectLine", ""),
-            "Last Activated by User": record.get("lastModifiedByUser", ""),
-            "Total Delivered": record.get("totalDelivered", 0),
-            "Total Hard Bouncebacks": record.get("totalHardBouncebacks", 0),
-            "Total Sends": record.get("totalSends", 0),
-            "Total Soft Bouncebacks": record.get("totalSoftBouncebacks", 0),
-            "Total Bouncebacks": record.get("totalBouncebacks", 0),
-            "Unique Opens": record.get("totalUniqueOpens", 0),
-            "Hard Bounceback Rate": record.get("hardBouncebackRate", 0.0),
-            "Soft Bounceback Rate": record.get("softBouncebackRate", 0.0),
-            "Bounceback Rate": record.get("bouncebackRate", 0.0),
-            "Clickthrough Rate": record.get("clickthroughRate", 0.0),
-            "Unique Clickthrough Rate": record.get("uniqueClickthroughRate", 0.0),
-            "Delivered Rate": record.get("deliveredRate", 0.0),
-            "Unique Open Rate": record.get("uniqueOpenRate", 0.0),
-            "Email Group": record.get("emailGroup", ""),
-            "Email Send Date": record.get("emailSendDate", ""),
-            "Email Address": record.get("emailAddress", ""),
-            "Contact Country": record.get("contactCountry", ""),
-            "HP Role": record.get("hpRole", ""),
-            "HP Partner Id": record.get("hpPartnerId", ""),
-            "Partner Name": record.get("partnerName", ""),
-            "Market": record.get("market", ""),
-        })
-    return report_data
+def fetch_contacts():
+    """Fetch contacts from Eloqua and save the response as a JSON file."""
+    raw_contacts = fetch_data(CONTACTS_ENDPOINT, "contacts_response.json")
+    
+    contacts_map = {}
+    for contact in raw_contacts.get("elements", []):  
+        contact_id = contact.get("id", "")
+        contacts_map[contact_id] = {
+            "Email Address": contact.get("emailAddress", ""),
+            "Contact Country": contact.get("country", ""),
+            "HP Role": contact.get("hpRole", ""),
+            "HP Partner Id": contact.get("hpPartnerId", ""),
+            "Partner Name": contact.get("partnerName", ""),
+            "Market": contact.get("market", ""),
+        }
 
-@app.route("/email-sends", methods=["GET"])
-def get_email_sends():
-    """Fetch Email Sends data and return as CSV"""
-    raw_data = fetch_data(EMAIL_SEND_ENDPOINT)
-    processed_data = process_email_sends(raw_data)
-    filename = save_data_as_csv(processed_data, "email_sends.csv")
-    return send_file(filename, as_attachment=True)
+    return contacts_map
 
 @app.route("/monthly-report", methods=["GET"])
 def generate_monthly_report():
-    """Generate a monthly report combining all email-related data"""
+    """Generate a monthly report combining all email-related data."""
     
-    # Fetch data from all endpoints
-    email_sends = fetch_data(EMAIL_SEND_ENDPOINT)
-    email_assets = fetch_data(EMAIL_ASSET_ENDPOINT)
-    email_activities = fetch_data("https://secure.p06.eloqua.com/API/OData/CampaignAnalysis/1/EmailActivities")
+    # Fetch and save API data
+    email_sends = fetch_data(EMAIL_SEND_ENDPOINT, "email_sends.json")
+    email_assets = fetch_data(EMAIL_ASSET_ENDPOINT, "email_assets.json")
+    email_activities = fetch_data(EMAIL_ACTIVITY_ENDPOINT, "email_activities.json")
+    contacts_data = fetch_contacts()  # Fetch contacts and save separately
 
     report_data = []
     
-    # Process data and merge into the final report format
     for send in email_sends.get("value", []):
         email_id = send.get("emailID")
+        contact_id = send.get("contactID")  # Assuming the contact ID is provided in the send data
+
         email_asset = next((ea for ea in email_assets.get("value", []) if ea.get("emailID") == email_id), {})
         email_activity = next((ea for ea in email_activities.get("value", []) if ea.get("emailId") == email_id), {})
+
+        contact_info = contacts_data.get(contact_id, {
+            "Email Address": "",
+            "Contact Country": "",
+            "HP Role": "",
+            "HP Partner Id": "",
+            "Partner Name": "",
+            "Market": "",
+        })
 
         report_data.append({
             "Email Name": email_asset.get("emailName", ""),
@@ -118,12 +111,7 @@ def generate_monthly_report():
             "Unique Open Rate": email_activity.get("totalOpens", 0),
             "Email Group": email_asset.get("emailGroup", ""),
             "Email Send Date": send.get("sentDateHour", ""),
-            "Email Address": send.get("emailAddress", ""),
-            "Contact Country": send.get("contactCountry", ""),
-            "HP Role": send.get("hpRole", ""),
-            "HP Partner Id": send.get("hpPartnerId", ""),
-            "Partner Name": send.get("partnerName", ""),
-            "Market": send.get("market", ""),
+            **contact_info  # Merge contact details
         })
 
     # Save report as CSV
@@ -131,7 +119,7 @@ def generate_monthly_report():
     return send_file(filename, as_attachment=True)
 
 def save_data_as_csv(data, filename):
-    """Save data to CSV file"""
+    """Save data to CSV file."""
     keys = data[0].keys() if data else []
     with open(filename, "w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=keys)
