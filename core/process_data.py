@@ -3,7 +3,8 @@ from core.utils import save_csv
 
 def generate_monthly_report():
     """Generate a monthly report combining all email-related data."""
-    email_sends, email_assets, email_activities, contact_activities = fetch_and_save_data()  # Expect only 4 values
+    email_sends, email_assets, email_activities, contact_activities = fetch_and_save_data()
+
 
     # Map contact activities by contactId
     contact_activity_map = {

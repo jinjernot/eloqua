@@ -24,7 +24,7 @@ def fetch_and_save_data():
     email_sends = fetch_data(EMAIL_SEND_ENDPOINT, "email_sends.json")
     email_assets = fetch_data(EMAIL_ASSET_ENDPOINT, "email_assets.json")
     email_activities = fetch_data(EMAIL_ACTIVITY_ENDPOINT, "email_activities.json")
-    contact_activities = fetch_data(CONTACT_ACTIVITY_ENDPOINT, "contact_activities.json")  # Replaces fetch_contacts()
+    contact_activities = fetch_data(CONTACT_ACTIVITY_ENDPOINT, "contact_activities.json") 
 
     return email_sends, email_assets, email_activities, contact_activities
 
