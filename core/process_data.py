@@ -2,10 +2,11 @@ from core.fetch_data import fetch_and_save_data
 from core.utils import save_csv
 
 def generate_monthly_report():
-    email_sends, email_assets, email_activities, contact_activities, campaing = fetch_and_save_data()
+    email_sends, email_assets, email_activities, contact_activities, campaing, campaign_users = fetch_and_save_data()
 
-    # Create a mapping of eloquaCampaignId to campaign data for quick lookup
+    # Create mappings for quick lookup
     campaign_map = {campaign.get("eloquaCampaignId"): campaign for campaign in campaing.get("value", [])}
+    user_map = {user.get("userID"): user.get("userName", "") for user in campaign_users.get("value", [])}
 
     report_data = []
     for send in email_sends.get("value", []):
@@ -22,11 +23,15 @@ def generate_monthly_report():
         # Lookup the campaign using eloquaCampaignId
         campaign_info = campaign_map.get(eloqua_campaign_id, {})
 
+        # Get the last activated user ID and resolve it to userName
+        last_activated_user_id = campaign_info.get("lastActivatedByUserId", "")
+        last_activated_user_name = user_map.get(last_activated_user_id, last_activated_user_id)  # Fallback to ID if name not found
+
         report_data.append({
             "Email Name": email_asset.get("emailName", ""),
             "Email ID": email_id,
             "Email Subject Line": email_asset.get("subjectLine", ""),
-            "Last Activated by User": campaign_info.get("lastActivatedByUserId", ""),  # Correctly mapped
+            "Last Activated by User": last_activated_user_name,  # Now shows userName instead of userID
             "Total Delivered": email_activity.get("totalDelivered", 0),
             "Total Hard Bouncebacks": email_activity.get("totalHardBouncebacks", 0),
             "Total Sends": email_activity.get("totalSends", 0),
