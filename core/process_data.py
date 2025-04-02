@@ -2,13 +2,10 @@ from core.fetch_data import fetch_and_save_data
 from core.utils import save_csv
 
 def generate_monthly_report():
+    email_sends, email_assets, email_activities, contact_activities, campaing = fetch_and_save_data()
 
-    email_sends, email_assets, email_activities, contact_activities = fetch_and_save_data()
-
-    contact_activity_map = {
-        activity.get("contactId"): activity
-        for activity in contact_activities.get("value", [])
-    }
+    # Create a mapping of eloquaCampaignId to campaign data for quick lookup
+    campaign_map = {campaign.get("eloquaCampaignId"): campaign for campaign in campaing.get("value", [])}
 
     report_data = []
     for send in email_sends.get("value", []):
@@ -17,26 +14,32 @@ def generate_monthly_report():
 
         email_asset = next((ea for ea in email_assets.get("value", []) if ea.get("emailID") == email_id), {})
         email_activity = next((ea for ea in email_activities.get("value", []) if ea.get("emailId") == email_id), {})
-        contact_info = contact_activity_map.get(contact_id, {})  # Get contact info from contact_activities
+        contact_info = next((c for c in contact_activities.get("value", []) if c.get("contactId") == contact_id), {})
+
+        # Fetch the eloquaCampaignId from email activities
+        eloqua_campaign_id = email_activity.get("eloquaCampaignId", "")
+
+        # Lookup the campaign using eloquaCampaignId
+        campaign_info = campaign_map.get(eloqua_campaign_id, {})
 
         report_data.append({
             "Email Name": email_asset.get("emailName", ""),
             "Email ID": email_id,
             "Email Subject Line": email_asset.get("subjectLine", ""),
-            "Last Activated by User": email_asset.get("lastActivatedByUserId", ""),
+            "Last Activated by User": campaign_info.get("lastActivatedByUserId", ""),  # Correctly mapped
             "Total Delivered": email_activity.get("totalDelivered", 0),
             "Total Hard Bouncebacks": email_activity.get("totalHardBouncebacks", 0),
             "Total Sends": email_activity.get("totalSends", 0),
             "Total Soft Bouncebacks": email_activity.get("totalSoftBouncebacks", 0),
             "Total Bouncebacks": email_activity.get("totalBouncebacks", 0),
             "Unique Opens": email_activity.get("totalOpens", 0),
-            "Hard Bounceback Rate": email_activity.get("", 0.0),
-            "Soft Bounceback Rate": email_activity.get("", 0.0),
-            "Bounceback Rate": email_activity.get("", 0.0),
-            "Clickthrough Rate": email_activity.get("", 0.0),
-            "Unique Clickthrough Rate": email_activity.get("", 0.0),
-            "Delivered Rate": email_activity.get("", 0),
-            "Unique Open Rate": email_activity.get("", 0),
+            "Hard Bounceback Rate": email_activity.get("hardBouncebackRate", 0.0),
+            "Soft Bounceback Rate": email_activity.get("softBouncebackRate", 0.0),
+            "Bounceback Rate": email_activity.get("bouncebackRate", 0.0),
+            "Clickthrough Rate": email_activity.get("clickthroughRate", 0.0),
+            "Unique Clickthrough Rate": email_activity.get("uniqueClickthroughRate", 0.0),
+            "Delivered Rate": email_activity.get("deliveredRate", 0),
+            "Unique Open Rate": email_activity.get("uniqueOpenRate", 0),
             "Email Group": email_asset.get("emailGroup", ""),
             "Email Send Date": send.get("sentDateHour", ""),
             "Email Address": contact_info.get("emailAddress", ""),
