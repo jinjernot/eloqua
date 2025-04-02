@@ -12,7 +12,7 @@ def home():
 
 @app.route("/callback")
 def callback():
-    """Handles OAuth callback and retrieves access token."""
+
     code = request.args.get("code")
     if not code:
         return jsonify({"error": "Authorization failed."})
@@ -27,15 +27,15 @@ def callback():
 
 @app.route("/test", methods=["GET"])
 def save_account_activity():
-    """Fetch and save Account Activity data from Eloqua API."""
+
     filename = fetch_account_activity()
     return jsonify({"message": "Data saved", "filename": "test.json"})
 
 
 
-@app.route("/monthly-report", methods=["GET"])
+@app.route("/report", methods=["GET"])
 def get_monthly_report():
-    """Fetch, process, and generate a monthly report as a downloadable CSV file."""
+
     filename = generate_monthly_report()
     return send_file(filename, as_attachment=True)
 
