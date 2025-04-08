@@ -27,6 +27,7 @@ def generate_monthly_report():
 
     email_sends, email_assets, email_activities, contact_activities, campaing, campaign_users = data
 
+    # Bulk contact data is fetched here, no need for looping over 'contact_activities'
     contact_elements = contact_activities.get("elements", [])
     contact_map = {str(contact.get("id")): contact for contact in contact_elements}
 
@@ -47,7 +48,7 @@ def generate_monthly_report():
 
         email_asset = next((ea for ea in email_assets.get("value", []) if ea.get("emailID") == email_id), {})
         email_activity = next((ea for ea in email_activities.get("value", []) if ea.get("emailId") == email_id), {})
-        contact_info = next((c for c in contact_activities.get("elements", []) if str(c.get("id")) == contact_id), {})
+        contact_info = contact_map.get(contact_id, {})
 
         email_send_date = send.get("sentDateHour", "")
         email_address = contact_info.get("emailAddress", "")
