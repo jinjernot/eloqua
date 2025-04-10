@@ -1,6 +1,5 @@
 import time
 import requests
-from datetime import datetime, timedelta
 from core.fetch_data import fetch_and_save_data
 from core.utils import save_csv
 
@@ -16,10 +15,14 @@ def fetch_data_with_retries(fetch_function, max_retries=3):
             break
     return None
 
-def generate_monthly_report():
-    # Get the date 100 days ago
-    date_100_days_ago = (datetime.now() - timedelta(days=100)).date()
+# Helper to extract custom field values by ID
+def extract_field_value(field_values, target_id):
+    for field in field_values:
+        if field.get("id") == target_id:
+            return field.get("value", "")
+    return ""
 
+def generate_monthly_report():
     data = fetch_data_with_retries(fetch_and_save_data)
     if not data:
         print("Failed to fetch data after retries.")
@@ -27,45 +30,21 @@ def generate_monthly_report():
 
     email_sends, email_assets, email_activities, contact_activities, campaing, campaign_users = data
 
-    # Bulk contact data is fetched here, no need for looping over 'contact_activities'
+    # Adjusted to new contact structure under "elements"
     contact_elements = contact_activities.get("elements", [])
     contact_map = {str(contact.get("id")): contact for contact in contact_elements}
 
     campaign_map = {campaign.get("eloquaCampaignId"): campaign for campaign in campaing.get("value", [])}
     user_map = {user.get("userID"): user.get("userName", "") for user in campaign_users.get("value", [])}
 
-    blocked_emails = {
-        "yl_110@hotmail.com",
-        "1021001399@qq.com",
-        "2604815709@qq.com",
-        "496707864@qq.com"
-    }
-
     report_data = []
     for send in email_sends.get("value", []):
         email_id = send.get("emailID")
-        contact_id = str(send.get("contactID", ""))
+        contact_id = str(send.get("contactID", ""))  # Ensure contact ID is a string
 
         email_asset = next((ea for ea in email_assets.get("value", []) if ea.get("emailID") == email_id), {})
         email_activity = next((ea for ea in email_activities.get("value", []) if ea.get("emailId") == email_id), {})
         contact_info = contact_map.get(contact_id, {})
-
-        email_send_date = send.get("sentDateHour", "")
-        email_address = contact_info.get("emailAddress", "")
-
-        # Convert the send date to a datetime object for comparison
-        try:
-            email_send_date_obj = datetime.strptime(email_send_date, "%Y-%m-%d")
-        except ValueError:
-            email_send_date_obj = None
-
-        # FILTERS
-        if not email_send_date_obj or email_send_date_obj.date() < date_100_days_ago:
-            continue
-        if "@hp.com" in email_address:
-            continue
-        if email_address in blocked_emails:
-            continue
 
         eloqua_campaign_id = email_activity.get("eloquaCampaignId", "")
         campaign_info = campaign_map.get(eloqua_campaign_id, {})
@@ -109,13 +88,13 @@ def generate_monthly_report():
             "Delivered Rate": delivered_rate,
             "Unique Open Rate": unique_open_rate,
             "Email Group": email_asset.get("emailGroup", ""),
-            "Email Send Date": email_send_date,
-            "Email Address": email_address,
+            "Email Send Date": send.get("sentDateHour", ""),
+            "Email Address": contact_info.get("emailAddress", ""),
             "Contact Country": contact_info.get("country", ""),
-            "HP Role": contact_info.get("C_HP_Role1", ""),
-            "HP Partner Id": contact_info.get("C_HP_PartnerID1", ""),
-            "Partner Name": contact_info.get("C_Partner_Name1", ""),
-            "Market": contact_info.get("C_Market1", ""),
+            "HP Role": extract_field_value(contact_info.get("fieldValues", []), "100199"),
+            "HP Partner Id": extract_field_value(contact_info.get("fieldValues", []), "100198"),
+            "Partner Name": extract_field_value(contact_info.get("fieldValues", []), "100197"),
+            "Market": extract_field_value(contact_info.get("fieldValues", []), "100195"),
         })
 
     return save_csv(report_data, "monthly_report.csv")
