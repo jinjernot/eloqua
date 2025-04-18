@@ -7,14 +7,12 @@ def save_json(data, filename):
         json.dump(data, file, ensure_ascii=False, indent=4)
 
 def save_csv(data, filename):
+    keys = data[0].keys() if data else ["No Data"]
 
-    if not data:
-        return filename
-
-    keys = data[0].keys()
     with open(filename, "w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=keys)
         writer.writeheader()
-        writer.writerows(data)
+        if data:
+            writer.writerows(data)
 
     return filename

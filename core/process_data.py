@@ -1,6 +1,7 @@
 import time
 import requests
 from core.fetch_data import fetch_and_save_data
+from core.bulk_contacts import batch_fetch_contacts_bulk
 from core.utils import save_csv
 
 def fetch_data_with_retries(fetch_function, max_retries=3):
@@ -15,86 +16,88 @@ def fetch_data_with_retries(fetch_function, max_retries=3):
             break
     return None
 
-# Helper to extract custom field values by ID
-def extract_field_value(field_values, target_id):
-    for field in field_values:
-        if field.get("id") == target_id:
-            return field.get("value", "")
-    return ""
-
 def generate_monthly_report():
     data = fetch_data_with_retries(fetch_and_save_data)
     if not data:
         print("Failed to fetch data after retries.")
         return None
 
-    email_sends, email_assets, email_activities, contact_activities, campaing, campaign_users = data
+    email_sends, email_assets, email_activities, _, campaign_analysis, campaign_users = data
 
-    # Adjusted to new contact structure under "elements"
-    contact_elements = contact_activities.get("elements", [])
-    contact_map = {str(contact.get("id")): contact for contact in contact_elements}
+    # 🔁 Extract the 100 most recent contactIDs for testing
+    contact_ids = [
+        str(send.get("contactID"))
+        for send in sorted(email_sends.get("value", []),
+                           key=lambda x: x.get("sentDateHour", ""),
+                           reverse=True)[:100]
+        if send.get("contactID")
+    ]
 
-    campaign_map = {campaign.get("eloquaCampaignId"): campaign for campaign in campaing.get("value", [])}
-    user_map = {user.get("userID"): user.get("userName", "") for user in campaign_users.get("value", [])}
+    # 🔁 Enrich via Bulk API
+    enriched_contacts = batch_fetch_contacts_bulk(contact_ids, batch_size=30)
+    print(f"[DEBUG] Retrieved {len(enriched_contacts)} enriched contacts")
 
-    report_data = []
+    # Build lookup map directly from flat list
+    contact_map = {
+        str(c["id"]): c
+        for c in enriched_contacts
+        if c.get("id") is not None
+    }
+
+    # Build other maps
+    campaign_map = {c.get("eloquaCampaignId"): c for c in campaign_analysis.get("value", [])}
+    user_map     = {u.get("userID"): u.get("userName", "") for u in campaign_users.get("value", [])}
+
+    report_rows = []
     for send in email_sends.get("value", []):
-        email_id = send.get("emailID")
-        contact_id = str(send.get("contactID", ""))  # Ensure contact ID is a string
+        cid = str(send.get("contactID", ""))
+        contact = contact_map.get(cid, {})
 
-        email_asset = next((ea for ea in email_assets.get("value", []) if ea.get("emailID") == email_id), {})
-        email_activity = next((ea for ea in email_activities.get("value", []) if ea.get("emailId") == email_id), {})
-        contact_info = contact_map.get(contact_id, {})
+        # lookup email asset & activity
+        ea = next((x for x in email_assets.get("value", []) if x.get("emailID") == send.get("emailID")), {})
+        act = next((x for x in email_activities.get("value", []) if x.get("emailId")  == send.get("emailID")), {})
 
-        eloqua_campaign_id = email_activity.get("eloquaCampaignId", "")
-        campaign_info = campaign_map.get(eloqua_campaign_id, {})
+        # campaign/user lookup
+        camp = campaign_map.get(act.get("eloquaCampaignId", ""), {})
+        user = user_map.get(camp.get("lastActivatedByUserId", ""), "")
 
-        last_activated_user_id = campaign_info.get("lastActivatedByUserId", "")
-        last_activated_user_name = user_map.get(last_activated_user_id, last_activated_user_id)
+        # rates and metrics (as before)...
+        total_sends    = act.get("totalSends", 1) or 1
+        total_delivered= act.get("totalDelivered",1) or 1
+        hr            = int((act.get("totalHardBouncebacks",0)/total_sends)*100)
+        sr            = int((act.get("totalSoftBouncebacks",0)/total_sends)*100)
+        br            = int((act.get("totalBouncebacks",0)/total_sends)*100)
+        cr            = int((act.get("totalClickthroughs",0)/total_delivered)*100)
+        ucr           = int((act.get("uniqueClickthroughs",0)/total_delivered)*100)
+        dr            = int((total_delivered/total_sends)*100)
+        uor           = int((act.get("uniqueOpens",0)/total_delivered)*100)
 
-        total_sends = email_activity.get("totalSends", 0) or 1
-        total_delivered = email_activity.get("totalDelivered", 0) or 1
-        total_hard_bouncebacks = email_activity.get("totalHardBouncebacks", 0)
-        total_soft_bouncebacks = email_activity.get("totalSoftBouncebacks", 0)
-        total_bouncebacks = email_activity.get("totalBouncebacks", 0)
-        total_clickthroughs = email_activity.get("totalClickthroughs", 0)
-        unique_clickthroughs = email_activity.get("uniqueClickthroughs", 0)
-        unique_opens = email_activity.get("uniqueOpens", 0)
-
-        hard_bounceback_rate = int((total_hard_bouncebacks / total_sends) * 100)
-        soft_bounceback_rate = int((total_soft_bouncebacks / total_sends) * 100)
-        bounceback_rate = int((total_bouncebacks / total_sends) * 100)
-        clickthrough_rate = int((total_clickthroughs / total_delivered) * 100)
-        unique_clickthrough_rate = int((unique_clickthroughs / total_delivered) * 100)
-        delivered_rate = int((total_delivered / total_sends) * 100)
-        unique_open_rate = int((unique_opens / total_delivered) * 100)
-
-        report_data.append({
-            "Email Name": email_asset.get("emailName", ""),
-            "Email ID": email_id,
-            "Email Subject Line": email_asset.get("subjectLine", ""),
-            "Last Activated by User": last_activated_user_name,
-            "Total Delivered": total_delivered,
-            "Total Hard Bouncebacks": total_hard_bouncebacks,
-            "Total Sends": total_sends,
-            "Total Soft Bouncebacks": total_soft_bouncebacks,
-            "Total Bouncebacks": total_bouncebacks,
-            "Unique Opens": unique_opens,
-            "Hard Bounceback Rate": hard_bounceback_rate,
-            "Soft Bounceback Rate": soft_bounceback_rate,
-            "Bounceback Rate": bounceback_rate,
-            "Clickthrough Rate": clickthrough_rate,
-            "Unique Clickthrough Rate": unique_clickthrough_rate,
-            "Delivered Rate": delivered_rate,
-            "Unique Open Rate": unique_open_rate,
-            "Email Group": email_asset.get("emailGroup", ""),
-            "Email Send Date": send.get("sentDateHour", ""),
-            "Email Address": contact_info.get("emailAddress", ""),
-            "Contact Country": contact_info.get("country", ""),
-            "HP Role": extract_field_value(contact_info.get("fieldValues", []), "100199"),
-            "HP Partner Id": extract_field_value(contact_info.get("fieldValues", []), "100198"),
-            "Partner Name": extract_field_value(contact_info.get("fieldValues", []), "100197"),
-            "Market": extract_field_value(contact_info.get("fieldValues", []), "100195"),
+        report_rows.append({
+            "Email Name":            ea.get("emailName", ""),
+            "Email ID":              send.get("emailID"),
+            "Email Subject Line":    ea.get("subjectLine", ""),
+            "Last Activated by User":user,
+            "Total Delivered":       total_delivered,
+            "Total Hard Bouncebacks":act.get("totalHardBouncebacks",0),
+            "Total Sends":           total_sends,
+            "Total Soft Bouncebacks":act.get("totalSoftBouncebacks",0),
+            "Total Bouncebacks":     act.get("totalBouncebacks",0),
+            "Unique Opens":          act.get("uniqueOpens",0),
+            "Hard Bounceback Rate":  hr,
+            "Soft Bounceback Rate":  sr,
+            "Bounceback Rate":       br,
+            "Clickthrough Rate":     cr,
+            "Unique Clickthrough Rate": ucr,
+            "Delivered Rate":        dr,
+            "Unique Open Rate":      uor,
+            "Email Group":           ea.get("emailGroup",""),
+            "Email Send Date":       send.get("sentDateHour",""),
+            "Email Address":         contact.get("emailAddress",""),
+            "Contact Country":       contact.get("country",""),
+            "HP Role":               contact.get("hp_role",""),
+            "HP Partner Id":         contact.get("hp_partner_id",""),
+            "Partner Name":          contact.get("partner_name",""),
+            "Market":                contact.get("market",""),
         })
 
-    return save_csv(report_data, "monthly_report.csv")
+    return save_csv(report_rows, "monthly_report.csv")
