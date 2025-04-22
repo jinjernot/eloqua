@@ -23,15 +23,11 @@ def callback():
 
     return jsonify(token_info)
 
-
-
 @app.route("/test", methods=["GET"])
 def save_account_activity():
 
     filename = fetch_account_activity()
     return jsonify({"message": "Data saved", "filename": "test.json"})
-  
-
 
 @app.route("/report", methods=["GET"])
 def get_monthly_report():

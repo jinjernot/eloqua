@@ -6,25 +6,11 @@ import json
 from auth import get_valid_access_token
 from core.utils import save_json
 
+from config import *
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-BASE_URL = "https://secure.p06.eloqua.com"
-BULK_CONTACT_EXPORT_URL = f"{BASE_URL}/api/bulk/2.0/contacts/exports"
-BULK_SYNC_URL = f"{BASE_URL}/api/bulk/2.0/syncs"
-
-SYNC_MAX_ATTEMPTS = 10
-SYNC_WAIT_SECONDS = 5
-
-CONTACT_FIELDS = {
-    "id": "{{Contact.Id}}",
-    "emailAddress": "{{Contact.Field(C_EmailAddress)}}",
-    "country": "{{Contact.Field(C_Country)}}",
-    "hp_role": "{{Contact.Field(C_HP_Role1)}}",
-    "hp_partner_id": "{{Contact.Field(C_HP_PartnerID1)}}",
-    "partner_name": "{{Contact.Field(C_Partner_Name1)}}",
-    "market": "{{Contact.Field(C_Market1)}}",
-}
 
 def chunk_list(full_list, chunk_size):
     """Split a list into chunks of a specific size."""
