@@ -55,7 +55,7 @@ def fetch_data(endpoint, filename, extra_params=None):
 
 def fetch_and_save_data():
     
-    one_hundred_days_ago = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    one_hundred_days_ago = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     email_send_params = {
         "$orderby": "sentDateHour desc",
@@ -74,7 +74,7 @@ def fetch_and_save_data():
         if send.get("contactID")
     }
 
-    contact_activities = batch_fetch_contacts_bulk(contact_ids=list(active_contact_ids), batch_size=25)
+    contact_activities = batch_fetch_contacts_bulk(contact_ids=list(active_contact_ids), batch_size=30)
     
     return email_sends, email_assets, email_activities, contact_activities, campaign_analysis, campaign_users
 
