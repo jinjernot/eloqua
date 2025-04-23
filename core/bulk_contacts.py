@@ -97,10 +97,12 @@ def fetch_contacts_bulk(contact_ids, batch_index=None):
 
             try:
                 data = data_resp.json()
-                filename = f"bulk_contact_data_batch_{batch_index}.json"
+                output_dir = "debug_contact_data"
+                os.makedirs(output_dir, exist_ok=True)
+                filename = os.path.join(output_dir, f"bulk_contact_data_batch_{batch_index}.json")
                 save_json(data, filename)
-                # ← Changed to pull from "items" instead of "elements"
                 return data.get("items", [])
+            
             except json.JSONDecodeError as json_err:
                 logging.error("Attempt %d: JSON parse error: %s", attempt + 1, json_err)
                 html_debug_file = f"debug_payloads/html_response_batch_{batch_index}.html"
