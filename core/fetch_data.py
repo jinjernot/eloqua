@@ -8,30 +8,6 @@ from core.utils import save_json
 from core.bulk_contacts import fetch_contacts_bulk, batch_fetch_contacts_bulk
 from datetime import datetime, timedelta
 
-def fetch_contact_field_definitions():
-    access_token = get_valid_access_token()
-    if not access_token:
-        return {"error": "Authorization required. Please re-authenticate."}
-
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/json"
-    }
-
-    url = "https://secure.p06.eloqua.com/api/bulk/2.0/contacts/fields"
-
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        data = response.json()
-        save_json(data, "contact_field_definitions.json")
-        print("✅ Contact field definitions saved to contact_field_definitions.json")
-        return data
-    else:
-        print(f"❌ Failed to fetch contact fields: {response.status_code} - {response.text}")
-        return {"error": "Failed to fetch contact fields", "details": response.text}
-
-
-
 
 def fetch_data(endpoint, filename, extra_params=None):
     access_token = get_valid_access_token()
@@ -55,7 +31,7 @@ def fetch_data(endpoint, filename, extra_params=None):
 
 def fetch_and_save_data():
     
-    one_hundred_days_ago = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    one_hundred_days_ago = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     email_send_params = {
         "$orderby": "sentDateHour desc",

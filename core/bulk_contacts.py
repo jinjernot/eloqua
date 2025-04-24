@@ -5,12 +5,13 @@ import os
 import json
 from auth import get_valid_access_token
 from core.utils import save_json
-
 from config import *
+
+# Toggle debug mode here
+DEBUG_MODE = False
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 
 def chunk_list(full_list, chunk_size):
     """Split a list into chunks of a specific size."""
@@ -24,6 +25,9 @@ def build_contact_id_filter(contact_ids):
 
 def save_payload_debug(payload, batch_index=None, debug_dir="debug_payloads"):
     """Save the export payload to a file for debugging purposes."""
+    if not DEBUG_MODE:
+        return
+
     os.makedirs(debug_dir, exist_ok=True)
     filename = f"{debug_dir}/payload_batch_{batch_index or 'unknown'}.json"
     try:
@@ -54,6 +58,7 @@ def fetch_contacts_bulk(contact_ids, batch_index=None):
             "fields": CONTACT_FIELDS,
             "filter": filter_query
         }
+
         save_payload_debug(export_payload, batch_index)
         logging.info("Initiating export with filter: %s", filter_query)
 
@@ -87,7 +92,6 @@ def fetch_contacts_bulk(contact_ids, batch_index=None):
             "Accept": "application/json"
         }
 
-        # Retry logic
         for attempt in range(3):
             data_resp = requests.get(data_url, headers=download_headers)
             if not data_resp.text.strip():
@@ -97,31 +101,44 @@ def fetch_contacts_bulk(contact_ids, batch_index=None):
 
             try:
                 data = data_resp.json()
-                output_dir = "debug_contact_data"
-                os.makedirs(output_dir, exist_ok=True)
-                filename = os.path.join(output_dir, f"bulk_contact_data_batch_{batch_index}.json")
-                save_json(data, filename)
+
+                if DEBUG_MODE:
+                    output_dir = "debug_contact_data"
+                    os.makedirs(output_dir, exist_ok=True)
+                    filename = os.path.join(output_dir, f"bulk_contact_data_batch_{batch_index}.json")
+                    save_json(data, filename)
+
                 return data.get("items", [])
-            
+
             except json.JSONDecodeError as json_err:
                 logging.error("Attempt %d: JSON parse error: %s", attempt + 1, json_err)
-                html_debug_file = f"debug_payloads/html_response_batch_{batch_index}.html"
-                with open(html_debug_file, 'w', encoding='utf-8') as f:
-                    f.write(data_resp.text)
-                logging.info("Saved HTML debug to: %s", html_debug_file)
+
+                if DEBUG_MODE:
+                    html_debug_file = f"debug_payloads/html_response_batch_{batch_index}.html"
+                    with open(html_debug_file, 'w', encoding='utf-8') as f:
+                        f.write(data_resp.text)
+                    logging.info("Saved HTML debug to: %s", html_debug_file)
+
                 time.sleep(2)
 
         logging.error("All attempts failed for batch %s", batch_index)
         return []
+
     except Exception as e:
         logging.exception("Error fetching contacts bulk: %s", e)
         return []
 
 def batch_fetch_contacts_bulk(contact_ids, batch_size=30):
-    """Fetch contacts in batches, returns flat list of all contacts."""
+    """Fetch contacts in batches, returns flat list of contacts excluding @hp.com emails."""
     all_contacts = []
     for idx, chunk in enumerate(chunk_list(contact_ids, batch_size), start=1):
         logging.info("Fetching batch %d/%d", idx, (len(contact_ids) + batch_size - 1) // batch_size)
         batch = fetch_contacts_bulk(chunk, batch_index=idx)
-        all_contacts.extend(batch)
+
+        filtered_batch = [
+            contact for contact in batch
+            if not contact.get("emailAddress", "").lower().endswith("@hp.com")
+        ]
+
+        all_contacts.extend(filtered_batch)
     return all_contacts

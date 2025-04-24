@@ -33,7 +33,6 @@ def generate_monthly_report():
             seen.add(key)
             unique_email_sends.append(send)
 
-    # 🔁 Extract the 100 most recent unique contactIDs for testing
     contact_ids = {
         str(send.get("contactID"))
         for send in unique_email_sends
@@ -57,8 +56,9 @@ def generate_monthly_report():
         ea = next((x for x in email_assets.get("value", []) if x.get("emailID") == send.get("emailID")), {})
         act = next((x for x in email_activities.get("value", []) if x.get("emailId") == send.get("emailID")), {})
 
-        camp = campaign_map.get(act.get("eloquaCampaignId", ""), {})
-        user = user_map.get(camp.get("lastActivatedByUserId", ""), "")
+        # Get the user who created the email (not the campaign user)
+        creator_id = ea.get("emailCreatedByUserID")
+        user = user_map.get(creator_id, "")
 
         total_sends = act.get("totalSends", 1) or 1
         total_delivered = act.get("totalDelivered", 1) or 1
@@ -75,7 +75,7 @@ def generate_monthly_report():
             "Email Name": ea.get("emailName", ""),
             "Email ID": send.get("emailID"),
             "Email Subject Line": ea.get("subjectLine", ""),
-            "Last Activated by User": user,
+            "Last Activated by User": user,  # ✅ now correct
             "Total Delivered": total_delivered,
             "Total Hard Bouncebacks": act.get("totalHardBouncebacks", 0),
             "Total Sends": total_sends,

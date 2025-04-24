@@ -9,11 +9,16 @@ from core.utils import save_json
 
 from config import *
 
+DEBUG_MODE = False 
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def save_payload_debug(payload, debug_name="email_sends", debug_dir="debug_payloads"):
     """Save the export payload to a file for debugging purposes."""
+    if not DEBUG_MODE:
+        return  # Skip saving if debug mode is off
+
     os.makedirs(debug_dir, exist_ok=True)
     filename = f"{debug_dir}/{debug_name}.json"
     try:
@@ -63,7 +68,8 @@ def fetch_email_sends_bulk(contact_ids, batch_index=None):
             "dataRetentionDuration": "PT12H"
         }
 
-        save_payload_debug(export_payload, debug_name=f"email_sends_batch_{batch_index}")
+        if DEBUG_MODE:
+            save_payload_debug(export_payload, debug_name=f"email_sends_batch_{batch_index}")
 
         # Step 1: Create export
         export_resp = requests.post(f"{BASE_URL}/api/bulk/2.0/activities/exports", headers=headers, json=export_payload)
@@ -103,13 +109,15 @@ def fetch_email_sends_bulk(contact_ids, batch_index=None):
                 output_dir = "debug_email_data"
                 os.makedirs(output_dir, exist_ok=True)
                 filename = os.path.join(output_dir, f"bulk_email_sends_batch_{batch_index}.json")
-                save_json(data, filename)
+                if DEBUG_MODE:
+                    save_json(data, filename)
                 return data.get("items", [])
 
             except json.JSONDecodeError as json_err:
-                html_file = f"debug_payloads/email_html_response_batch_{batch_index}.html"
-                with open(html_file, 'w', encoding='utf-8') as f:
-                    f.write(data_resp.text)
+                if DEBUG_MODE:
+                    html_file = f"debug_payloads/email_html_response_batch_{batch_index}.html"
+                    with open(html_file, 'w', encoding='utf-8') as f:
+                        f.write(data_resp.text)
                 logging.error("Attempt %d: JSON decode failed: %s", attempt + 1, json_err)
                 time.sleep(2)
 
