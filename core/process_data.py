@@ -3,6 +3,7 @@ import requests
 from core.fetch_data import fetch_and_save_data
 from core.bulk_contacts import batch_fetch_contacts_bulk
 from core.utils import save_csv
+from dateutil import parser
 
 def fetch_data_with_retries(fetch_function, max_retries=3):
     for attempt in range(max_retries):
@@ -24,7 +25,7 @@ def generate_monthly_report():
 
     email_sends, email_assets, email_activities, _, campaign_analysis, campaign_users = data
 
-    # 🔁 Deduplicate email_sends by (emailID, contactID)
+    # Deduplicate email_sends by (emailID, contactID)
     seen = set()
     unique_email_sends = []
     for send in email_sends.get("value", []):
@@ -39,7 +40,7 @@ def generate_monthly_report():
         if send.get("contactID")
     }
 
-    # 🔁 Enrich via Bulk API
+    # Enrich via Bulk API
     enriched_contacts = batch_fetch_contacts_bulk(list(contact_ids), batch_size=30)
     print(f"[DEBUG] Retrieved {len(enriched_contacts)} enriched contacts")
 
@@ -56,32 +57,32 @@ def generate_monthly_report():
         ea = next((x for x in email_assets.get("value", []) if x.get("emailID") == send.get("emailID")), {})
         act = next((x for x in email_activities.get("value", []) if x.get("emailId") == send.get("emailID")), {})
 
-        # Get the user who created the email (not the campaign user)
+        # Get the user who created the email
         creator_id = ea.get("emailCreatedByUserID")
         user = user_map.get(creator_id, "")
-
+        unique_clickthroughs = (act.get("existingVisitorClickthroughs", 0) or 0) + (act.get("newVisitorClickthroughs", 0) or 0)
         total_sends = act.get("totalSends", 1) or 1
         total_delivered = act.get("totalDelivered", 1) or 1
 
         hr = int((act.get("totalHardBouncebacks", 0) / total_sends) * 100)
         sr = int((act.get("totalSoftBouncebacks", 0) / total_sends) * 100)
         br = int((act.get("totalBouncebacks", 0) / total_sends) * 100)
-        cr = int((act.get("totalClickthroughs", 0) / total_delivered) * 100)
-        ucr = int((act.get("uniqueClickthroughs", 0) / total_delivered) * 100)
+        cr = act.get("clickthroughRate", 0)
+        ucr = int((unique_clickthroughs / total_delivered) * 100)
         dr = int((total_delivered / total_sends) * 100)
-        uor = int((act.get("uniqueOpens", 0) / total_delivered) * 100)
+        uor = int((act.get("totalOpens", 0) / total_delivered) * 100)
 
         report_rows.append({
             "Email Name": ea.get("emailName", ""),
             "Email ID": send.get("emailID"),
             "Email Subject Line": ea.get("subjectLine", ""),
-            "Last Activated by User": user,  # ✅ now correct
+            "Last Activated by User": user,
             "Total Delivered": total_delivered,
             "Total Hard Bouncebacks": act.get("totalHardBouncebacks", 0),
             "Total Sends": total_sends,
             "Total Soft Bouncebacks": act.get("totalSoftBouncebacks", 0),
             "Total Bouncebacks": act.get("totalBouncebacks", 0),
-            "Unique Opens": act.get("uniqueOpens", 0),
+            "Unique Opens": act.get("totalOpens", 0),
             "Hard Bounceback Rate": hr,
             "Soft Bounceback Rate": sr,
             "Bounceback Rate": br,
@@ -90,7 +91,7 @@ def generate_monthly_report():
             "Delivered Rate": dr,
             "Unique Open Rate": uor,
             "Email Group": ea.get("emailGroup", ""),
-            "Email Send Date": send.get("sentDateHour", ""),
+            "Email Send Date": parser.parse(send.get("sentDateHour", "")).strftime("%#m/%#d/%Y %#I:%M:%S %p") if send.get("sentDateHour") else "",
             "Email Address": contact.get("emailAddress", ""),
             "Contact Country": contact.get("country", ""),
             "HP Role": contact.get("hp_role", ""),

@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import time
 import logging
@@ -7,7 +8,7 @@ from auth import get_valid_access_token
 from core.utils import save_json
 from config import *
 
-# Toggle debug mode here
+# Toggle debug mode for saving payloads and responses
 DEBUG_MODE = False
 
 # Setup logging
@@ -91,7 +92,7 @@ def fetch_contacts_bulk(contact_ids, batch_index=None):
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json"
         }
-
+        
         for attempt in range(3):
             data_resp = requests.get(data_url, headers=download_headers)
             if not data_resp.text.strip():
@@ -128,17 +129,45 @@ def fetch_contacts_bulk(contact_ids, batch_index=None):
         logging.exception("Error fetching contacts bulk: %s", e)
         return []
 
-def batch_fetch_contacts_bulk(contact_ids, batch_size=30):
-    """Fetch contacts in batches, returns flat list of contacts excluding @hp.com emails."""
+def batch_fetch_contacts_bulk(contact_ids, batch_size=30, max_workers=10):
+    """Fetch contacts in batches using ThreadPoolExecutor; skips @hp.com emails."""
+    from threading import Lock
+
+    def safe_fetch(chunk, batch_index):
+        try:
+            logging.info(f"Starting batch {batch_index} with {len(chunk)} contacts...")
+            result = fetch_contacts_bulk(chunk, batch_index)
+            logging.info(f"Completed batch {batch_index} with {len(result)} contacts.")
+            return result
+        except Exception as e:
+            logging.error("Batch %s failed: %s", batch_index, e)
+            return []
+
     all_contacts = []
-    for idx, chunk in enumerate(chunk_list(contact_ids, batch_size), start=1):
-        logging.info("Fetching batch %d/%d", idx, (len(contact_ids) + batch_size - 1) // batch_size)
-        batch = fetch_contacts_bulk(chunk, batch_index=idx)
+    futures = []
+    lock = Lock()
 
-        filtered_batch = [
-            contact for contact in batch
-            if not contact.get("emailAddress", "").lower().endswith("@hp.com")
-        ]
+    total_batches = (len(contact_ids) + batch_size - 1) // batch_size
+    completed_batches = 0
 
-        all_contacts.extend(filtered_batch)
+    logging.info("Fetching %d contacts in parallel using %d threads...", len(contact_ids), max_workers)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for idx, chunk in enumerate(chunk_list(contact_ids, batch_size), start=1):
+            futures.append(executor.submit(safe_fetch, chunk, idx))
+
+        for future in as_completed(futures):
+            batch_result = future.result()
+
+            filtered = [
+                contact for contact in batch_result
+                if not contact.get("emailAddress", "").lower().endswith("@hp.com")
+            ]
+
+            with lock:
+                all_contacts.extend(filtered)
+                completed_batches += 1
+                logging.info(f"Progress: {completed_batches}/{total_batches} batches complete.")
+
+    logging.info("All batches processed. Total valid contacts: %d", len(all_contacts))
     return all_contacts
