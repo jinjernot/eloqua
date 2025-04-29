@@ -17,15 +17,17 @@ def fetch_data_with_retries(fetch_function, max_retries=3):
             break
     return None
 
-def generate_monthly_report():
-    data = fetch_data_with_retries(fetch_and_save_data)
+def generate_daily_report(target_date):
+    def fetch_wrapper():
+        return fetch_and_save_data(target_date)
+
+    data = fetch_data_with_retries(fetch_wrapper)
     if not data:
         print("Failed to fetch data after retries.")
         return None
 
     email_sends, email_assets, email_activities, _, campaign_analysis, campaign_users = data
 
-    # Deduplicate email_sends by (emailID, contactID)
     seen = set()
     unique_email_sends = []
     for send in email_sends.get("value", []):
@@ -40,7 +42,6 @@ def generate_monthly_report():
         if send.get("contactID")
     }
 
-    # Enrich via Bulk API
     enriched_contacts = batch_fetch_contacts_bulk(list(contact_ids), batch_size=30)
     print(f"[DEBUG] Retrieved {len(enriched_contacts)} enriched contacts")
 
@@ -53,11 +54,9 @@ def generate_monthly_report():
         cid = str(send.get("contactID", ""))
         contact = contact_map.get(cid, {})
 
-        # Email asset & activity
         ea = next((x for x in email_assets.get("value", []) if x.get("emailID") == send.get("emailID")), {})
         act = next((x for x in email_activities.get("value", []) if x.get("emailId") == send.get("emailID")), {})
 
-        # Get the user who created the email
         creator_id = ea.get("emailCreatedByUserID")
         user = user_map.get(creator_id, "")
         unique_clickthroughs = (act.get("existingVisitorClickthroughs", 0) or 0) + (act.get("newVisitorClickthroughs", 0) or 0)
@@ -91,7 +90,7 @@ def generate_monthly_report():
             "Delivered Rate": dr,
             "Unique Open Rate": uor,
             "Email Group": ea.get("emailGroup", ""),
-            "Email Send Date": parser.parse(send.get("sentDateHour", "")).strftime("%#m/%#d/%Y %#I:%M:%S %p") if send.get("sentDateHour") else "",
+            "Email Send Date": parser.parse(send.get("sentDateHour", "")).strftime("%Y-%m-%d %I:%M:%S %p") if send.get("sentDateHour") else "",
             "Email Address": contact.get("emailAddress", ""),
             "Contact Country": contact.get("country", ""),
             "HP Role": contact.get("hp_role", ""),
@@ -100,4 +99,4 @@ def generate_monthly_report():
             "Market": contact.get("market", ""),
         })
 
-    return save_csv(report_rows, "monthly_report.csv")
+    return save_csv(report_rows, f"{target_date}.csv")

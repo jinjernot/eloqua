@@ -41,17 +41,23 @@ def fetch_data(endpoint, filename, extra_params=None):
     return full_data
 
 
-def fetch_and_save_data():
-    fourteen_days_ago = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+def fetch_and_save_data(target_date=None):
+    if target_date:
+        start = datetime.strptime(target_date, "%Y-%m-%d")
+    else:
+        start = datetime.utcnow() - timedelta(days=1)
+
+    start_str = start.strftime("%Y-%m-%dT00:00:00Z")
+    end_str = (start + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
 
     email_send_params = {
         "$orderby": "sentDateHour desc",
-        "$filter": f"sentDateHour ge {fourteen_days_ago}"
+        "$filter": f"sentDateHour ge {start_str} and sentDateHour lt {end_str}"
     }
-    
+
     email_activity_params = {
         "$orderby": "dateHour desc",
-        "$filter": f"dateHour ge {fourteen_days_ago}"
+        "$filter": f"dateHour ge {start_str} and dateHour lt {end_str}"
     }
 
     email_sends = fetch_data(EMAIL_SEND_ENDPOINT, "email_sends.json", extra_params=email_send_params)
