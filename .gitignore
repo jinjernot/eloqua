@@ -4,4 +4,6 @@ old
 *.json
 config.py
 auth.py
+auth_pro.py
 *csv
+run_daily.py

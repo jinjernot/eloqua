@@ -1,8 +1,7 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify
 from auth import get_access_token, get_valid_access_token
-from core.fetch_data import fetch_account_activity
 from config import *
-from core.process_data import generate_daily_report
+from core.bulk.process_data_bulk import generate_daily_report
 from datetime import datetime, timedelta
 import os
 
@@ -24,13 +23,6 @@ def callback():
         return jsonify({"error": "Failed to retrieve token", "details": error})
 
     return jsonify(token_info)
-
-@app.route("/test", methods=["GET"])
-def save_account_activity():
-
-    filename = fetch_account_activity()
-    return jsonify({"message": "Data saved", "filename": "test.json"})
-
 
 @app.route("/daily", methods=["GET"])
 def generate_batch():
