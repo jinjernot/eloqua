@@ -70,7 +70,7 @@ def fetch_and_save_data(target_date=None):
     }
 
     # Fetch EmailSend activities using Bulk API
-    bulk_email_activities = batch_fetch_activities_bulk(activity_ids=list(active_contact_ids), max_workers=15)
+    bulk_email_activities = batch_fetch_activities_bulk(contact_ids=list(active_contact_ids), max_workers=15)
 
     # Fetch contact metadata using bulk
     contact_activities = batch_fetch_contacts_bulk(contact_ids=list(active_contact_ids), batch_size=20, max_workers=15)
