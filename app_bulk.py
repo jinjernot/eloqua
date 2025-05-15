@@ -27,7 +27,7 @@ def callback():
 @app.route("/daily", methods=["GET"])
 def generate_batch():
     # How many past days you want to generate reports for, including yesterday
-    days_back = 5
+    days_back = 1
     
     # Yesterday date (UTC)
     end_date = datetime.utcnow().date() - timedelta(days=1)

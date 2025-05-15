@@ -27,7 +27,6 @@ def save_debug_payload(payload, filename, debug_dir="debug_payloads"):
 
 
 def fetch_email_sends_bulk(start_date, end_date):
-    """Fetches email send activities using the Eloqua Bulk API within a date range."""
     try:
         access_token = get_valid_access_token()
         headers = {
@@ -68,38 +67,50 @@ def fetch_email_sends_bulk(start_date, end_date):
             if poll_resp.json().get("status") == "success":
                 logging.info("Sync completed.")
                 break
+        else:
+            logging.error("Sync did not complete in expected time.")
+            return []
 
-        # Step 4: Download data
+        # Step 4: Download all data with pagination
         sync_id = sync_uri.split("/")[-1]
-        data_url = f"{BASE_URL}/api/bulk/2.0/syncs/{sync_id}/data"
+        base_data_url = f"{BASE_URL}/api/bulk/2.0/syncs/{sync_id}/data"
         download_headers = {
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json"
         }
 
-        for attempt in range(3):
-            data_resp = requests.get(data_url, headers=download_headers)
-            if not data_resp.text.strip():
-                logging.warning("Attempt %d: Empty response, retrying...", attempt + 1)
-                time.sleep(2)
-                continue
+        all_items = []
+        offset = 0
+        limit = 1000
+
+        while True:
+            paged_url = f"{base_data_url}?offset={offset}&limit={limit}"
+            data_resp = requests.get(paged_url, headers=download_headers)
+            if data_resp.status_code != 200:
+                logging.error(f"Failed to fetch data at offset {offset}: {data_resp.text}")
+                break
 
             try:
                 data = data_resp.json()
+                items = data.get("items", [])
+                all_items.extend(items)
 
-                if DEBUG_MODE:
-                    os.makedirs("debug_email_sends", exist_ok=True)
-                    filename = f"debug_email_sends/email_sends_{start_date[:10]}.json"
-                    save_json(data, filename)
+                if len(items) < limit:
+                    break  # Last page
 
-                return data.get("items", [])
+                offset += limit
 
             except json.JSONDecodeError as json_err:
-                logging.error("Attempt %d: JSON parse error: %s", attempt + 1, json_err)
-                time.sleep(2)
+                logging.error("JSON parse error at offset %d: %s", offset, json_err)
+                break
 
-        logging.error("All download attempts failed for email sends.")
-        return []
+        # Optional: Save full debug
+        if DEBUG_MODE:
+            os.makedirs("debug_email_sends", exist_ok=True)
+            filename = f"debug_email_sends/email_sends_{start_date[:10]}.json"
+            save_json({"items": all_items}, filename)
+
+        return all_items
 
     except Exception as e:
         logging.exception("Failed to fetch email sends bulk: %s", e)
