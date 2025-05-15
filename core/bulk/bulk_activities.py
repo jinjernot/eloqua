@@ -15,19 +15,28 @@ DEBUG_MODE = True
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-def chunk_list(full_list, chunk_size):
-    for i in range(0, len(full_list), chunk_size):
-        yield full_list[i:i + chunk_size]
+def smart_chunk_contacts(contact_ids, max_chars=1000):
+    chunks, current_chunk, current_len = [], [], 0
+    for cid in contact_ids:
+        clause = f"'{{Activity.Contact.Id}}' = '{cid}'"
+        added_len = len(clause) + (4 if current_chunk else 0)  # +4 for " OR "
+        if current_len + added_len > max_chars:
+            chunks.append(current_chunk)
+            current_chunk = [cid]
+            current_len = len(clause)
+        else:
+            current_chunk.append(cid)
+            current_len += added_len
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
 
 
 def build_activity_filter(contact_ids, activity_type="EmailSend") -> str:
-    if isinstance(contact_ids, list) and len(contact_ids) == 1:
-        contact_id = contact_ids[0]
-    elif isinstance(contact_ids, list):
-        raise ValueError("Multiple contact IDs not supported in filter. Send one at a time.")
-    else:
-        contact_id = contact_ids
-    return f"'{{{{Activity.Type}}}}' = '{activity_type}' AND '{{{{Activity.Contact.Id}}}}' = '{contact_id}'"
+    id_clauses = [f"'{{{{Activity.Contact.Id}}}}' = '{cid}'" for cid in contact_ids]
+    id_filter = " OR ".join(id_clauses)
+    return f"'{{{{Activity.Type}}}}' = '{activity_type}' AND ({id_filter})"
+
 
 def save_payload_debug(payload, batch_index=None, debug_dir="debug_payloads"):
     if not DEBUG_MODE:
@@ -48,7 +57,6 @@ def fetch_activities_bulk(contact_ids, activity_type, batch_index=None):
             logging.warning("No contact IDs provided.")
             return []
 
-        # Convert all contact IDs to strings
         contact_ids = [str(cid) for cid in contact_ids]
         filter_query = build_activity_filter(contact_ids, activity_type)
         export_name = f"Bulk_Activity_Export_Batch_{batch_index or 'N'}"
@@ -131,10 +139,10 @@ def fetch_activities_bulk(contact_ids, activity_type, batch_index=None):
 def batch_fetch_activities_bulk(contact_ids, max_workers=10, activity_type="EmailSend"):
     from threading import Lock
 
-    def safe_fetch(contact_id, batch_index):
+    def safe_fetch(contact_id_batch, batch_index):
         try:
-            logging.info(f"Fetching batch {batch_index} for contact ID {contact_id}...")
-            result = fetch_activities_bulk([contact_id], activity_type, batch_index)
+            logging.info(f"Fetching batch {batch_index} for contact IDs {contact_id_batch}...")
+            result = fetch_activities_bulk(contact_id_batch, activity_type, batch_index)
             logging.info(f"Finished batch {batch_index} with {len(result)} records.")
             return result
         except Exception as e:
@@ -145,14 +153,16 @@ def batch_fetch_activities_bulk(contact_ids, max_workers=10, activity_type="Emai
     futures = []
     lock = Lock()
 
-    total_batches = len(contact_ids)
+    contact_batches = smart_chunk_contacts(contact_ids)
+    total_batches = len(contact_batches)
     completed_batches = 0
 
-    logging.info("Starting bulk activity fetch for %d contacts with %d threads...", len(contact_ids), max_workers)
+    logging.info("Starting bulk activity fetch for %d contacts (%d batches) using %d threads...",
+                 len(contact_ids), total_batches, max_workers)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for idx, contact_id in enumerate(contact_ids, start=1):
-            futures.append(executor.submit(safe_fetch, contact_id, idx))
+        for idx, contact_batch in enumerate(contact_batches, start=1):
+            futures.append(executor.submit(safe_fetch, contact_batch, idx))
 
         for future in as_completed(futures):
             batch_result = future.result()
