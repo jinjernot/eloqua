@@ -19,7 +19,7 @@ def smart_chunk_contacts(contact_ids, max_chars=1000):
     chunks, current_chunk, current_len = [], [], 0
     for cid in contact_ids:
         clause = f"'{{Activity.Contact.Id}}' = '{cid}'"
-        added_len = len(clause) + (4 if current_chunk else 0)  # +4 for " OR "
+        added_len = len(clause) + (4 if current_chunk else 0)
         if current_len + added_len > max_chars:
             chunks.append(current_chunk)
             current_chunk = [cid]

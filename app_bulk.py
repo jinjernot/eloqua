@@ -26,11 +26,16 @@ def callback():
 
 @app.route("/daily", methods=["GET"])
 def generate_batch():
-    start_date = datetime.utcnow() - timedelta(days=4)
+    # How many past days you want to generate reports for, including yesterday
+    days_back = 5
+    
+    # Yesterday date (UTC)
+    end_date = datetime.utcnow().date() - timedelta(days=1)
+    
     generated_files = []
 
-    for i in range(5):
-        date = start_date + timedelta(days=i)
+    for i in range(days_back):
+        date = end_date - timedelta(days=i)  # Move backwards from yesterday
         date_str = date.strftime("%Y-%m-%d")
         output_file = f"data/{date_str}.csv"
 
@@ -40,20 +45,13 @@ def generate_batch():
 
         print(f"[INFO] Generating report for {date_str}")
         path = generate_daily_report(date_str)
-        generated_files.append(path)
+        if path:
+            generated_files.append(path)
 
     return jsonify({
         "message": "Batch report generation complete",
         "files": generated_files
     })
-
-@app.route("/test-auth")
-def test_auth():
-    token = get_valid_access_token()
-    if token:
-        return f"Valid token acquired: {token[:10]}..."
-    else:
-        return "Token missing or refresh failed. Please re-authenticate.", 401
-
+    
 if __name__ == "__main__":
     app.run(port=5000, debug=True)

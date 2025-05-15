@@ -28,40 +28,47 @@ def generate_daily_report(target_date):
 
     email_sends, email_assets, email_activities, _, campaign_analysis, campaign_users = data
 
-    # Now using bulk fetched activities data
+    # Normalize data
+    email_sends_list = email_sends if isinstance(email_sends, list) else email_sends.get("items", [])
+    email_assets_list = email_assets if isinstance(email_assets, list) else email_assets.get("items", [])
     activities_list = email_activities if isinstance(email_activities, list) else email_activities.get("items", [])
+    campaign_analysis_list = campaign_analysis if isinstance(campaign_analysis, list) else campaign_analysis.get("items", [])
+    campaign_users_list = campaign_users if isinstance(campaign_users, list) else campaign_users.get("items", [])
 
     seen = set()
     unique_email_sends = []
-    for send in email_sends.get("value", []):
-        key = (send.get("emailID"), send.get("contactID"))
+    for send in email_sends_list:
+        key = (send.get("assetId"), send.get("contactId"))
         if key not in seen:
             seen.add(key)
             unique_email_sends.append(send)
 
     contact_ids = {
-        str(send.get("contactID"))
+        str(send.get("contactId"))
         for send in unique_email_sends
-        if send.get("contactID")
+        if send.get("contactId")
     }
 
     enriched_contacts = batch_fetch_contacts_bulk(list(contact_ids), batch_size=20)
     print(f"[DEBUG] Retrieved {len(enriched_contacts)} enriched contacts")
 
     contact_map = {str(c["id"]): c for c in enriched_contacts if c.get("id") is not None}
-    campaign_map = {c.get("eloquaCampaignId"): c for c in campaign_analysis.get("value", [])}
-    user_map = {u.get("userID"): u.get("userName", "") for u in campaign_users.get("value", [])}
+    campaign_map = {c.get("eloquaCampaignId"): c for c in campaign_analysis_list}
+    user_map = {u.get("userID"): u.get("userName", "") for u in campaign_users_list}
 
     report_rows = []
     for send in unique_email_sends:
-        cid = str(send.get("contactID", ""))
+        cid = str(send.get("contactId", ""))
         contact = contact_map.get(cid, {})
 
-        ea = next((x for x in email_assets.get("value", []) if x.get("emailID") == send.get("emailID")), {})
-        act = next((x for x in activities_list if x.get("emailId") == send.get("emailID") and x.get("contactId") == send.get("contactID")), {})
+        asset_id = send.get("assetId")
+        act = next((x for x in activities_list if x.get("emailId") == asset_id and str(x.get("contactId")) == cid), {})
 
-        creator_id = ea.get("emailCreatedByUserID")
+        campaign_id = send.get("campaignId")
+        campaign = campaign_map.get(campaign_id, {})
+        creator_id = campaign.get("createdBy")
         user = user_map.get(creator_id, "")
+
         unique_clickthroughs = (act.get("existingVisitorClickthroughs", 0) or 0) + (act.get("newVisitorClickthroughs", 0) or 0)
         total_sends = act.get("totalSends", 1) or 1
         total_delivered = act.get("totalDelivered", 1) or 1
@@ -75,9 +82,9 @@ def generate_daily_report(target_date):
         uor = int((act.get("totalOpens", 0) / total_delivered) * 100)
 
         report_rows.append({
-            "Email Name": ea.get("emailName", ""),
-            "Email ID": send.get("emailID"),
-            "Email Subject Line": ea.get("subjectLine", ""),
+            "Email Name": send.get("assetName", ""),
+            "Email ID": asset_id,
+            "Email Subject Line": send.get("subjectLine", ""),
             "Last Activated by User": user,
             "Total Delivered": total_delivered,
             "Total Hard Bouncebacks": act.get("totalHardBouncebacks", 0),
@@ -92,8 +99,8 @@ def generate_daily_report(target_date):
             "Unique Clickthrough Rate": ucr,
             "Delivered Rate": dr,
             "Unique Open Rate": uor,
-            "Email Group": ea.get("emailGroup", ""),
-            "Email Send Date": parser.parse(send.get("sentDateHour", "")).strftime("%Y-%m-%d %I:%M:%S %p") if send.get("sentDateHour") else "",
+            "Email Group": "",  # Not available in new structure
+            "Email Send Date": parser.parse(send.get("activityDate", send.get("campaignResponseDate", ""))).strftime("%Y-%m-%d %I:%M:%S %p") if send.get("activityDate") else "",
             "Email Address": contact.get("emailAddress", ""),
             "Contact Country": contact.get("country", ""),
             "HP Role": contact.get("hp_role", ""),
