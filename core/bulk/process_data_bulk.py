@@ -26,12 +26,11 @@ def generate_daily_report(target_date):
         print("Failed to fetch data after retries.")
         return None
 
-    email_sends, email_assets, email_activities, _, campaign_analysis, campaign_users = data
+    email_sends, email_assets, _, _, campaign_analysis, campaign_users = data  # Ignored email_activities
 
     # Normalize data
     email_sends_list = email_sends if isinstance(email_sends, list) else email_sends.get("items", [])
     email_assets_list = email_assets if isinstance(email_assets, list) else email_assets.get("items", [])
-    activities_list = email_activities if isinstance(email_activities, list) else email_activities.get("items", [])
     campaign_analysis_list = campaign_analysis if isinstance(campaign_analysis, list) else campaign_analysis.get("items", [])
     campaign_users_list = campaign_users if isinstance(campaign_users, list) else campaign_users.get("items", [])
 
@@ -62,24 +61,26 @@ def generate_daily_report(target_date):
         contact = contact_map.get(cid, {})
 
         asset_id = send.get("assetId")
-        act = next((x for x in activities_list if x.get("emailId") == asset_id and str(x.get("contactId")) == cid), {})
 
         campaign_id = send.get("campaignId")
         campaign = campaign_map.get(campaign_id, {})
         creator_id = campaign.get("createdBy")
         user = user_map.get(creator_id, "")
 
-        unique_clickthroughs = (act.get("existingVisitorClickthroughs", 0) or 0) + (act.get("newVisitorClickthroughs", 0) or 0)
-        total_sends = act.get("totalSends", 1) or 1
-        total_delivered = act.get("totalDelivered", 1) or 1
-
-        hr = int((act.get("totalHardBouncebacks", 0) / total_sends) * 100)
-        sr = int((act.get("totalSoftBouncebacks", 0) / total_sends) * 100)
-        br = int((act.get("totalBouncebacks", 0) / total_sends) * 100)
-        cr = act.get("clickthroughRate", 0)
-        ucr = int((unique_clickthroughs / total_delivered) * 100)
-        dr = int((total_delivered / total_sends) * 100)
-        uor = int((act.get("totalOpens", 0) / total_delivered) * 100)
+        # PLACEHOLDERS for missing fields from activities:
+        total_sends = 0
+        total_delivered = 0
+        total_hard_bouncebacks = 0
+        total_soft_bouncebacks = 0
+        total_bouncebacks = 0
+        unique_opens = 0
+        clickthrough_rate = 0
+        unique_clickthrough_rate = 0
+        delivered_rate = 0
+        unique_open_rate = 0
+        hard_bounceback_rate = 0
+        soft_bounceback_rate = 0
+        bounceback_rate = 0
 
         report_rows.append({
             "Email Name": send.get("assetName", ""),
@@ -87,18 +88,18 @@ def generate_daily_report(target_date):
             "Email Subject Line": send.get("subjectLine", ""),
             "Last Activated by User": user,
             "Total Delivered": total_delivered,
-            "Total Hard Bouncebacks": act.get("totalHardBouncebacks", 0),
+            "Total Hard Bouncebacks": total_hard_bouncebacks,
             "Total Sends": total_sends,
-            "Total Soft Bouncebacks": act.get("totalSoftBouncebacks", 0),
-            "Total Bouncebacks": act.get("totalBouncebacks", 0),
-            "Unique Opens": act.get("totalOpens", 0),
-            "Hard Bounceback Rate": hr,
-            "Soft Bounceback Rate": sr,
-            "Bounceback Rate": br,
-            "Clickthrough Rate": cr,
-            "Unique Clickthrough Rate": ucr,
-            "Delivered Rate": dr,
-            "Unique Open Rate": uor,
+            "Total Soft Bouncebacks": total_soft_bouncebacks,
+            "Total Bouncebacks": total_bouncebacks,
+            "Unique Opens": unique_opens,
+            "Hard Bounceback Rate": hard_bounceback_rate,
+            "Soft Bounceback Rate": soft_bounceback_rate,
+            "Bounceback Rate": bounceback_rate,
+            "Clickthrough Rate": clickthrough_rate,
+            "Unique Clickthrough Rate": unique_clickthrough_rate,
+            "Delivered Rate": delivered_rate,
+            "Unique Open Rate": unique_open_rate,
             "Email Group": "",  # Not available in new structure
             "Email Send Date": parser.parse(send.get("activityDate", send.get("campaignResponseDate", ""))).strftime("%Y-%m-%d %I:%M:%S %p") if send.get("activityDate") else "",
             "Email Address": contact.get("emailAddress", ""),

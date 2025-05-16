@@ -1,7 +1,7 @@
 import time
 import requests
-from core.fetch_data import fetch_and_save_data
-from core.bulk_contacts import batch_fetch_contacts_bulk
+from core.bulk.fetch_data_bulk import fetch_and_save_data
+from core.bulk.bulk_contacts import batch_fetch_contacts_bulk
 from core.utils import save_csv
 from dateutil import parser
 
@@ -26,62 +26,71 @@ def generate_daily_report(target_date):
         print("Failed to fetch data after retries.")
         return None
 
-    email_sends, email_assets, email_activities, _, campaign_analysis, campaign_users = data
+    email_sends, email_assets, _, _, campaign_analysis, campaign_users = data
+
+    email_sends_list = email_sends if isinstance(email_sends, list) else email_sends.get("items", [])
+    campaign_analysis_list = campaign_analysis if isinstance(campaign_analysis, list) else campaign_analysis.get("items", [])
+    campaign_users_list = campaign_users if isinstance(campaign_users, list) else campaign_users.get("items", [])
 
     seen = set()
     unique_email_sends = []
-    for send in email_sends.get("value", []):
-        key = (send.get("emailID"), send.get("contactID"))
+    for send in email_sends_list:
+        key = (send.get("assetId"), send.get("contactId"))
         if key not in seen:
             seen.add(key)
             unique_email_sends.append(send)
 
     contact_ids = {
-        str(send.get("contactID"))
+        str(send.get("contactId"))
         for send in unique_email_sends
-        if send.get("contactID")
+        if send.get("contactId")
     }
 
-    enriched_contacts = batch_fetch_contacts_bulk(list(contact_ids), batch_size=30)
+    enriched_contacts = batch_fetch_contacts_bulk(list(contact_ids), batch_size=20)
     print(f"[DEBUG] Retrieved {len(enriched_contacts)} enriched contacts")
 
     contact_map = {str(c["id"]): c for c in enriched_contacts if c.get("id") is not None}
-    campaign_map = {c.get("eloquaCampaignId"): c for c in campaign_analysis.get("value", [])}
-    user_map = {u.get("userID"): u.get("userName", "") for u in campaign_users.get("value", [])}
+    campaign_map = {c.get("eloquaCampaignId"): c for c in campaign_analysis_list}
+    user_map = {u.get("userID"): u.get("userName", "") for u in campaign_users_list}
 
     report_rows = []
     for send in unique_email_sends:
-        cid = str(send.get("contactID", ""))
+        cid = str(send.get("contactId", ""))
         contact = contact_map.get(cid, {})
 
-        ea = next((x for x in email_assets.get("value", []) if x.get("emailID") == send.get("emailID")), {})
-        act = next((x for x in email_activities.get("value", []) if x.get("emailId") == send.get("emailID")), {})
-
-        creator_id = ea.get("emailCreatedByUserID")
+        campaign_id = send.get("campaignId")
+        campaign = campaign_map.get(campaign_id, {})
+        creator_id = campaign.get("createdBy")
         user = user_map.get(creator_id, "")
-        unique_clickthroughs = (act.get("existingVisitorClickthroughs", 0) or 0) + (act.get("newVisitorClickthroughs", 0) or 0)
-        total_sends = act.get("totalSends", 1) or 1
-        total_delivered = act.get("totalDelivered", 1) or 1
 
-        hr = int((act.get("totalHardBouncebacks", 0) / total_sends) * 100)
-        sr = int((act.get("totalSoftBouncebacks", 0) / total_sends) * 100)
-        br = int((act.get("totalBouncebacks", 0) / total_sends) * 100)
-        cr = act.get("clickthroughRate", 0)
+        # Placeholder calculations until activity data is reinstated
+        total_sends = 1
+        total_delivered = 1
+        total_hard_bounces = 0
+        total_soft_bounces = 0
+        total_bounces = 0
+        unique_clickthroughs = 0
+        total_opens = 0
+
+        hr = int((total_hard_bounces / total_sends) * 100)
+        sr = int((total_soft_bounces / total_sends) * 100)
+        br = int((total_bounces / total_sends) * 100)
+        cr = 0
         ucr = int((unique_clickthroughs / total_delivered) * 100)
         dr = int((total_delivered / total_sends) * 100)
-        uor = int((act.get("totalOpens", 0) / total_delivered) * 100)
+        uor = int((total_opens / total_delivered) * 100)
 
         report_rows.append({
-            "Email Name": ea.get("emailName", ""),
-            "Email ID": send.get("emailID"),
-            "Email Subject Line": ea.get("subjectLine", ""),
+            "Email Name": send.get("assetName", ""),
+            "Email ID": send.get("assetId"),
+            "Email Subject Line": send.get("subjectLine", ""),
             "Last Activated by User": user,
             "Total Delivered": total_delivered,
-            "Total Hard Bouncebacks": act.get("totalHardBouncebacks", 0),
+            "Total Hard Bouncebacks": total_hard_bounces,
             "Total Sends": total_sends,
-            "Total Soft Bouncebacks": act.get("totalSoftBouncebacks", 0),
-            "Total Bouncebacks": act.get("totalBouncebacks", 0),
-            "Unique Opens": act.get("totalOpens", 0),
+            "Total Soft Bouncebacks": total_soft_bounces,
+            "Total Bouncebacks": total_bounces,
+            "Unique Opens": total_opens,
             "Hard Bounceback Rate": hr,
             "Soft Bounceback Rate": sr,
             "Bounceback Rate": br,
@@ -89,9 +98,9 @@ def generate_daily_report(target_date):
             "Unique Clickthrough Rate": ucr,
             "Delivered Rate": dr,
             "Unique Open Rate": uor,
-            "Email Group": ea.get("emailGroup", ""),
-            "Email Send Date": parser.parse(send.get("sentDateHour", "")).strftime("%Y-%m-%d %I:%M:%S %p") if send.get("sentDateHour") else "",
-            "Email Address": contact.get("emailAddress", ""),
+            "Email Group": send.get("emailSendType", ""),  # Now available
+            "Email Send Date": parser.parse(send.get("activityDate", send.get("campaignResponseDate", ""))).strftime("%Y-%m-%d %I:%M:%S %p") if send.get("activityDate") else "",
+            "Email Address": send.get("emailAddress", ""),
             "Contact Country": contact.get("country", ""),
             "HP Role": contact.get("hp_role", ""),
             "HP Partner Id": contact.get("hp_partner_id", ""),

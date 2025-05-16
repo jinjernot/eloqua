@@ -9,7 +9,7 @@ from core.utils import save_json
 from config import *
 
 # Toggle debug mode for saving payloads and responses
-DEBUG_MODE = False
+DEBUG_MODE = True
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
