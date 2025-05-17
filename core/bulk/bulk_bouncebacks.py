@@ -26,7 +26,7 @@ def save_debug_payload(payload, filename, debug_dir="debug_payloads"):
         logging.error("Failed to save debug payload: %s", e)
 
 
-def fetch_email_sends_bulk(start_date, end_date):
+def fetch_bouncebacks_bulk(start_date, end_date):
     try:
         access_token = get_valid_access_token()
         headers = {
@@ -35,22 +35,38 @@ def fetch_email_sends_bulk(start_date, end_date):
             "Accept": "application/json"
         }
 
-        # Construct filter
-        date_filter = f"'{{{{Activity.Type}}}}' = 'EmailSend' AND '{{{{Activity.CreatedAt}}}}' >= '{start_date}' AND '{{{{Activity.CreatedAt}}}}' < '{end_date}'"
+        # Construct filter for bounceback activities
+        date_filter = f"'{{{{Activity.Type}}}}' = 'Bounceback' AND '{{{{Activity.CreatedAt}}}}' >= '{start_date}' AND '{{{{Activity.CreatedAt}}}}' < '{end_date}'"
 
         export_payload = {
-            "name": f"Bulk_EmailSend_{start_date[:10]}",
-            "fields": EMAIL_SEND_FIELDS,
-            "filter": date_filter
+            "name": f"Bulk_Bounceback_{start_date[:10]}",
+            "fields": {
+                "ActivityId": "{{Activity.Id}}",
+                "ActivityType": "{{Activity.Type}}",
+                "ActivityDate": "{{Activity.CreatedAt}}",
+                "EmailAddress": "{{Activity.Field(EmailAddress)}}",
+                "ContactId": "{{Activity.Contact.Id}}",
+                "AssetType": "{{Activity.Asset.Type}}",
+                "AssetName": "{{Activity.Asset.Name}}",
+                "AssetId": "{{Activity.Asset.Id}}",
+                "CampaignId": "{{Activity.Campaign.Id}}",
+                "ExternalId": "{{Activity.ExternalId}}",
+                "EmailRecipientId": "{{Activity.Field(EmailRecipientId)}}",
+                "DeploymentId": "{{Activity.Field(EmailDeploymentId)}}",
+                "SmtpErrorCode": "{{Activity.Field(SmtpErrorCode)}}",
+                "SmtpStatusCode": "{{Activity.Field(SmtpStatusCode)}}",
+                "SmtpMessage": "{{Activity.Field(SmtpMessage)}}"
+            },
+            "filter": date_filter  # <-- Use the correctly formatted filter string here
         }
 
-        save_debug_payload(export_payload, f"email_send_export_payload_{start_date[:10]}.json")
+        save_debug_payload(export_payload, f"bounceback_export_payload_{start_date[:10]}.json")
 
         # Step 1: Create export
         export_resp = requests.post(BULK_ACTIVITY_EXPORT_URL, headers=headers, json=export_payload)
         export_resp.raise_for_status()
         export_uri = export_resp.json().get("uri")
-        logging.info("Created EmailSend export: %s", export_uri)
+        logging.info("Created Bounceback export: %s", export_uri)
 
         # Step 2: Start sync
         sync_resp = requests.post(BULK_SYNC_URL, headers=headers, json={"syncedInstanceUri": export_uri})
@@ -106,12 +122,12 @@ def fetch_email_sends_bulk(start_date, end_date):
 
         # Optional: Save full debug
         if DEBUG_MODE:
-            os.makedirs("debug_email_sends", exist_ok=True)
-            filename = f"debug_email_sends/email_sends_{start_date[:10]}.json"
+            os.makedirs("debug_bouncebacks", exist_ok=True)
+            filename = f"debug_bouncebacks/bouncebacks_{start_date[:10]}.json"
             save_json({"items": all_items}, filename)
 
         return all_items
 
     except Exception as e:
-        logging.exception("Failed to fetch email sends bulk: %s", e)
+        logging.exception("Failed to fetch bounceback activities: %s", e)
         return []

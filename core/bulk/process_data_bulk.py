@@ -1,9 +1,11 @@
 import time
 import requests
+from dateutil import parser
+
 from core.bulk.fetch_data_bulk import fetch_and_save_data
 from core.bulk.bulk_contacts import batch_fetch_contacts_bulk
 from core.utils import save_csv
-from dateutil import parser
+
 
 def fetch_data_with_retries(fetch_function, max_retries=3):
     for attempt in range(max_retries):
@@ -17,91 +19,95 @@ def fetch_data_with_retries(fetch_function, max_retries=3):
             break
     return None
 
-def generate_daily_report(target_date):
-    def fetch_wrapper():
-        return fetch_and_save_data(target_date)
 
-    data = fetch_data_with_retries(fetch_wrapper)
+def generate_daily_report(target_date):
+    data = fetch_data_with_retries(lambda: fetch_and_save_data(target_date))
     if not data:
         print("Failed to fetch data after retries.")
         return None
 
-    email_sends, email_assets, _, _, campaign_analysis, campaign_users = data  # Ignored email_activities
-
-    # Normalize data
-    email_sends_list = email_sends if isinstance(email_sends, list) else email_sends.get("items", [])
-    email_assets_list = email_assets if isinstance(email_assets, list) else email_assets.get("items", [])
-    campaign_analysis_list = campaign_analysis if isinstance(campaign_analysis, list) else campaign_analysis.get("items", [])
-    campaign_users_list = campaign_users if isinstance(campaign_users, list) else campaign_users.get("items", [])
+    email_sends = data.get("email_sends", [])
+    contact_activities = data.get("contact_activities", [])
+    bouncebacks = data.get("bouncebacks", [])
 
     seen = set()
     unique_email_sends = []
-    for send in email_sends_list:
-        key = (send.get("assetId"), send.get("contactId"))
+    for send in email_sends:
+        key = (send.get("assetId"), send.get("contactID"))
         if key not in seen:
             seen.add(key)
             unique_email_sends.append(send)
+            print(f"Unique email sends: {len(unique_email_sends)}")
 
-    contact_ids = {
-        str(send.get("contactId"))
-        for send in unique_email_sends
-        if send.get("contactId")
-    }
-
+    contact_ids = {str(send.get("contactID")) for send in unique_email_sends if send.get("contactID")}
+    print(f"Contact IDs to enrich: {contact_ids}")
     enriched_contacts = batch_fetch_contacts_bulk(list(contact_ids), batch_size=20)
-    print(f"[DEBUG] Retrieved {len(enriched_contacts)} enriched contacts")
-
     contact_map = {str(c["id"]): c for c in enriched_contacts if c.get("id") is not None}
-    campaign_map = {c.get("eloquaCampaignId"): c for c in campaign_analysis_list}
-    user_map = {u.get("userID"): u.get("userName", "") for u in campaign_users_list}
+
+    bounceback_counts = {}
+    for bb in bouncebacks:
+        cid = str(bb.get("ContactId") or bb.get("contactID") or "")
+        asset_id = bb.get("AssetId") or bb.get("assetId") or None
+        bb_type = bb.get("BouncebackType", "").lower()
+
+        if not cid or not asset_id:
+            continue
+
+        key = (asset_id, cid)
+        bounceback_counts.setdefault(key, {"hard": 0, "soft": 0, "total": 0})
+        bounceback_counts[key]["total"] += 1
+        if "hard" in bb_type:
+            bounceback_counts[key]["hard"] += 1
+        elif "soft" in bb_type:
+            bounceback_counts[key]["soft"] += 1
 
     report_rows = []
     for send in unique_email_sends:
-        cid = str(send.get("contactId", ""))
+        cid = str(send.get("contactID", ""))
         contact = contact_map.get(cid, {})
 
         asset_id = send.get("assetId")
+        key = (asset_id, cid)
+        bb_counts = bounceback_counts.get(key, {"hard": 0, "soft": 0, "total": 0})
 
-        campaign_id = send.get("campaignId")
-        campaign = campaign_map.get(campaign_id, {})
-        creator_id = campaign.get("createdBy")
-        user = user_map.get(creator_id, "")
+        total_sends = 1
+        total_hard_bouncebacks = bb_counts["hard"]
+        total_soft_bouncebacks = bb_counts["soft"]
+        total_bouncebacks = bb_counts["total"]
 
-        # PLACEHOLDERS for missing fields from activities:
-        total_sends = 0
-        total_delivered = 0
-        total_hard_bouncebacks = 0
-        total_soft_bouncebacks = 0
-        total_bouncebacks = 0
-        unique_opens = 0
-        clickthrough_rate = 0
-        unique_clickthrough_rate = 0
-        delivered_rate = 0
-        unique_open_rate = 0
-        hard_bounceback_rate = 0
-        soft_bounceback_rate = 0
-        bounceback_rate = 0
+        bounceback_rate = total_bouncebacks / total_sends if total_sends else 0
+        hard_bounceback_rate = total_hard_bouncebacks / total_sends if total_sends else 0
+        soft_bounceback_rate = total_soft_bouncebacks / total_sends if total_sends else 0
+
+        total_delivered = total_sends - total_bouncebacks
+        delivered_rate = total_delivered / total_sends if total_sends else 0
+
+        date_str = send.get("activityDate") or send.get("campaignResponseDate") or ""
+        try:
+            formatted_date = parser.parse(date_str).strftime("%Y-%m-%d %I:%M:%S %p") if date_str else ""
+        except Exception:
+            formatted_date = ""
 
         report_rows.append({
             "Email Name": send.get("assetName", ""),
             "Email ID": asset_id,
             "Email Subject Line": send.get("subjectLine", ""),
-            "Last Activated by User": user,
+            "Last Activated by User": "",  # Removed: Reporting API User enrichment
             "Total Delivered": total_delivered,
             "Total Hard Bouncebacks": total_hard_bouncebacks,
             "Total Sends": total_sends,
             "Total Soft Bouncebacks": total_soft_bouncebacks,
             "Total Bouncebacks": total_bouncebacks,
-            "Unique Opens": unique_opens,
-            "Hard Bounceback Rate": hard_bounceback_rate,
-            "Soft Bounceback Rate": soft_bounceback_rate,
-            "Bounceback Rate": bounceback_rate,
-            "Clickthrough Rate": clickthrough_rate,
-            "Unique Clickthrough Rate": unique_clickthrough_rate,
-            "Delivered Rate": delivered_rate,
-            "Unique Open Rate": unique_open_rate,
-            "Email Group": "",  # Not available in new structure
-            "Email Send Date": parser.parse(send.get("activityDate", send.get("campaignResponseDate", ""))).strftime("%Y-%m-%d %I:%M:%S %p") if send.get("activityDate") else "",
+            "Unique Opens": 0,
+            "Hard Bounceback Rate": round(hard_bounceback_rate, 4),
+            "Soft Bounceback Rate": round(soft_bounceback_rate, 4),
+            "Bounceback Rate": round(bounceback_rate, 4),
+            "Clickthrough Rate": 0,
+            "Unique Clickthrough Rate": 0,
+            "Delivered Rate": round(delivered_rate, 4),
+            "Unique Open Rate": 0,
+            "Email Group": "",
+            "Email Send Date": formatted_date,
             "Email Address": contact.get("emailAddress", ""),
             "Contact Country": contact.get("country", ""),
             "HP Role": contact.get("hp_role", ""),

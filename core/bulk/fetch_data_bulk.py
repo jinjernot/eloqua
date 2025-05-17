@@ -1,45 +1,13 @@
 import os
-import requests
-from auth import get_valid_access_token
-from config import (
-    EMAIL_ASSET_ENDPOINT,
-    CAMPAING_ANALYSIS_ENDPOINT, CAMPAING_USERS_ENDPOINT
-)
-from core.utils import save_json
-from core.bulk.bulk_contacts import batch_fetch_contacts_bulk
-from core.bulk.bulk_activities import batch_fetch_activities_bulk
-from core.bulk.bulk_email_send import fetch_email_sends_bulk
 from datetime import datetime, timedelta
 
+from core.utils import save_json
+from core.bulk.bulk_contacts import batch_fetch_contacts_bulk
+from core.bulk.bulk_email_send import fetch_email_sends_bulk
+from core.bulk.bulk_bouncebacks import fetch_bouncebacks_bulk
+
 data_dir = "data"
-
-def fetch_data(endpoint, filename, extra_params=None):
-    access_token = get_valid_access_token()
-    if not access_token:
-        return {"error": "Authorization required. Please re-authenticate."}
-
-    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
-    params = {"depth": "complete"}
-    if extra_params:
-        params.update(extra_params)
-
-    full_data = {"value": []}
-    url = endpoint
-
-    while url:
-        response = requests.get(url, headers=headers, params=params if url == endpoint else None)
-
-        if response.status_code != 200:
-            return {"error": "Failed to fetch data", "details": response.text}
-
-        data = response.json()
-        full_data["value"].extend(data.get("value", []))
-        url = data.get("@odata.nextLink")
-        params = None
-
-    filepath = os.path.join(data_dir, filename)
-    save_json(full_data, filepath)
-    return full_data
+os.makedirs(data_dir, exist_ok=True)
 
 def fetch_and_save_data(target_date=None):
     if target_date:
@@ -50,23 +18,35 @@ def fetch_and_save_data(target_date=None):
     start_str = start.strftime("%Y-%m-%dT00:00:00Z")
     end_str = (start + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
 
-    # Fetch all data via Bulk API
+    # Step 1: Fetch EmailSend activities
     email_sends = fetch_email_sends_bulk(start_str, end_str)
     save_json(email_sends, os.path.join(data_dir, "email_sends.json"))
+    print(f"[INFO] Fetched {len(email_sends)} email sends.")
 
-    email_assets = fetch_data(EMAIL_ASSET_ENDPOINT, "email_assets.json")
-    campaign_analysis = fetch_data(CAMPAING_ANALYSIS_ENDPOINT, "campaign.json")
-    campaign_users = fetch_data(CAMPAING_USERS_ENDPOINT, "campaign_users.json")
+    if not email_sends:
+        print("[ERROR] No email sends found. Skipping contact and bounceback fetch.")
+        return
 
-    # Extract contact IDs from email sends
-    active_contact_ids = {
-        str(send.get("contactID")) for send in email_sends if send.get("contactID")
+    # Step 2: Extract contact IDs
+    contact_ids = {str(send.get("contactId")) for send in email_sends if send.get("contactId")}
+    contact_id_list = list(contact_ids)
+    print(f"[INFO] Extracted {len(contact_id_list)} unique contact IDs.")
+
+    # Step 3: Fetch contacts if available
+    contact_activities = []
+    if contact_id_list:
+        contact_activities = batch_fetch_contacts_bulk(contact_ids=contact_id_list, batch_size=20, max_workers=15)
+        print(f"[INFO] Fetched {len(contact_activities)} contact activities.")
+    else:
+        print("[WARNING] No valid contact IDs found.")
+
+    # Step 4: Fetch bouncebacks
+    bouncebacks = fetch_bouncebacks_bulk(start_str, end_str)
+    save_json(bouncebacks, os.path.join(data_dir, "bouncebacks.json"))
+    print(f"[INFO] Fetched {len(bouncebacks)} bouncebacks.")
+
+    return {
+        "email_sends": email_sends,
+        "contact_activities": contact_activities,
+        "bouncebacks": bouncebacks
     }
-
-    # Fetch EmailSend activities using Bulk API
-    bulk_email_activities = batch_fetch_activities_bulk(contact_ids=list(active_contact_ids), max_workers=15)
-
-    # Fetch contact metadata using Bulk API
-    contact_activities = batch_fetch_contacts_bulk(contact_ids=list(active_contact_ids), batch_size=20, max_workers=15)
-
-    return email_sends, email_assets, bulk_email_activities, contact_activities, campaign_analysis, campaign_users

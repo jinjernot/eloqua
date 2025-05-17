@@ -9,7 +9,7 @@ from core.utils import save_json
 from config import *
 
 # Toggle debug mode for saving payloads and responses
-DEBUG_MODE = False
+DEBUG_MODE = True
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -158,6 +158,7 @@ def batch_fetch_contacts_bulk(contact_ids, batch_size=30, max_workers=15):
 
         for future in as_completed(futures):
             batch_result = future.result()
+            print(f"Batch result count (before filtering): {len(batch_result)}")
 
             filtered = [
                 contact for contact in batch_result
