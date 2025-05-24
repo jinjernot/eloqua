@@ -32,6 +32,7 @@ def generate_daily_report(target_date):
     campaign_analysis = data.get("campaign_analysis", {}).get("value", [])
     campaign_users = data.get("campaign_users", {}).get("value", [])
     email_clickthroughs = data.get("email_clickthroughs", {}).get("value", [])
+    email_opens = data.get("email_opens", {}).get("value", [])
 
     # Prepare unique email sends (de-duplicate by assetId and contactId)
     seen = set()
@@ -72,7 +73,6 @@ def generate_daily_report(target_date):
             bounceback_counts[key]["hard"] += 1
         elif smtp_error.startswith("4."):
             bounceback_counts[key]["soft"] += 1
-        # else: ignore or handle unknown bounce types if needed
 
     # Process clickthroughs
     click_map = {}
@@ -92,6 +92,24 @@ def generate_daily_report(target_date):
             unique_clicks_by_asset[asset_id] = set()
         unique_clicks_by_asset[asset_id].add(cid)
 
+    # Process opens
+    open_map = {}
+    unique_opens_by_asset = {}
+    print(f"Loaded {len(email_opens)} open records")
+    for open_evt in email_opens:
+        asset_id = str(open_evt.get("emailID"))
+        cid = str(open_evt.get("contactID"))
+
+        if not asset_id or not cid:
+            continue
+
+        key = (asset_id, cid)
+        open_map[key] = open_map.get(key, 0) + 1
+
+        if asset_id not in unique_opens_by_asset:
+            unique_opens_by_asset[asset_id] = set()
+        unique_opens_by_asset[asset_id].add(cid)
+
     # Build report rows
     report_rows = []
     for send in unique_email_sends:
@@ -102,7 +120,7 @@ def generate_daily_report(target_date):
         key = (asset_id, cid)
         bb_counts = bounceback_counts.get(key, {"hard": 0, "soft": 0, "total": 0})
 
-        total_sends = 1
+        total_sends = 1  # Since this row represents 1 send to 1 contact
         total_hard_bouncebacks = bb_counts["hard"]
         total_soft_bouncebacks = bb_counts["soft"]
         total_bouncebacks = bb_counts["total"]
@@ -116,11 +134,18 @@ def generate_daily_report(target_date):
 
         # Clickthrough rates
         total_clicks = click_map.get(key, 0)
-        unique_clicks = len(unique_clicks_by_asset.get(asset_id, set()))
-        total_unique_sends = len({str(s["contactId"]) for s in unique_email_sends if str(s.get("assetId")) == asset_id})
-
         clickthrough_rate = total_clicks / total_sends if total_sends else 0
-        unique_clickthrough_rate = unique_clicks / total_unique_sends if total_unique_sends else 0
+
+        # Per contact: 1 if the contact clicked at least once, else 0
+        unique_clicks = 1 if total_clicks > 0 else 0
+        unique_clickthrough_rate = unique_clicks / total_sends  # This will be 1 or 0 per contact row
+
+        # Open rates - UPDATED to show per contact opens, not aggregate unique opens:
+        total_opens = open_map.get(key, 0)  # number of opens by this contact for this asset
+        # For Unique Opens, per contact perspective: 1 if opened at least once, else 0
+        unique_opens = 1 if total_opens > 0 else 0
+
+        unique_open_rate = unique_opens / total_sends  # This will be 1 or 0 per contact row
 
         date_str = send.get("activityDate") or send.get("campaignResponseDate") or ""
         try:
@@ -151,14 +176,14 @@ def generate_daily_report(target_date):
             "Total Sends": total_sends,
             "Total Soft Bouncebacks": total_soft_bouncebacks,
             "Total Bouncebacks": total_bouncebacks,
-            "Unique Opens": 0,
+            "Unique Opens": unique_opens,
             "Hard Bounceback Rate": int(hard_bounceback_rate * 100),
             "Soft Bounceback Rate": int(soft_bounceback_rate * 100),
             "Bounceback Rate": int(bounceback_rate * 100),
             "Clickthrough Rate": round(clickthrough_rate * 100, 2),
             "Unique Clickthrough Rate": round(unique_clickthrough_rate * 100, 2),
             "Delivered Rate": round(delivered_rate, 4),
-            "Unique Open Rate": 0,
+            "Unique Open Rate": round(unique_open_rate * 100, 2),  # per contact: 0 or 100%
             "Email Group": "",
             "Email Send Date": formatted_date,
             "Email Address": contact.get("emailAddress", ""),

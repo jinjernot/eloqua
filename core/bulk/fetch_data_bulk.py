@@ -45,8 +45,7 @@ def fetch_and_save_data(target_date=None):
     bouncebacks = fetch_bouncebacks_bulk(start_str, end_str)
     save_json(bouncebacks, os.path.join(DATA_DIR, "bouncebacks.json"))
     print(f"[INFO] Fetched {len(bouncebacks)} bouncebacks.")
-    
-    
+
     # TEMP: Preview fields in raw EmailBounceback data from OData
     BOUNCEBACK_OData_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/ActivityDetails/1/EmailBounceback"
     preview_filter = f"bouncebackDateHour ge {start_str} and bouncebackDateHour lt {end_str}"
@@ -67,8 +66,6 @@ def fetch_and_save_data(target_date=None):
         else:
             print("[INFO] No bouncebacks found in preview.")
 
-
-
     # Step 5: Fetch clickthrough activities filtered by clickDateHour
     CLICKTHROUGH_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/ActivityDetails/1/EmailClickthrough"
     filter_str = f"clickDateHour ge {start_str} and clickDateHour lt {end_str}"
@@ -85,6 +82,23 @@ def fetch_and_save_data(target_date=None):
         print(f"[INFO] Fetched {len(email_clickthrough.get('value', []))} email clickthroughs.")
 
     save_json(email_clickthrough, os.path.join(DATA_DIR, "email_clickthrough.json"))
+
+    # === Step 7: Fetch email open activities filtered by openDateHour ===
+    EMAIL_OPEN_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/ActivityDetails/1/EmailOpen"
+    open_filter_str = f"openDateHour ge {start_str} and openDateHour lt {end_str}"
+
+    email_opens = fetch_data(
+        EMAIL_OPEN_ENDPOINT,
+        "email_open.json",
+        extra_params={"$filter": open_filter_str}
+    )
+
+    if "error" in email_opens:
+        print(f"[ERROR] Failed to fetch email opens: {email_opens['error']}")
+    else:
+        print(f"[INFO] Fetched {len(email_opens.get('value', []))} email opens.")
+
+    save_json(email_opens, os.path.join(DATA_DIR, "email_open.json"))
 
     # Step 6: Fetch campaign data from REST endpoints
     CAMPAIGN_ANALYSIS_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/CampaignAnalysis/1/Campaign"
@@ -107,6 +121,7 @@ def fetch_and_save_data(target_date=None):
         "contact_activities": contact_activities,
         "bouncebacks": bouncebacks,
         "email_clickthroughs": email_clickthrough,
+        "email_opens": email_opens,
         "campaign_analysis": campaign_analysis,
         "campaign_users": campaign_users,
     }
