@@ -35,7 +35,7 @@ def generate_batch():
     generated_files = []
 
     for i in range(days_back):
-        date = end_date - timedelta(days=i)  # Move backwards from yesterday
+        date = end_date - timedelta(days=i)
         date_str = date.strftime("%Y-%m-%d")
         output_file = f"data/{date_str}.csv"
 
@@ -52,6 +52,6 @@ def generate_batch():
         "message": "Batch report generation complete",
         "files": generated_files
     })
-    
+    6
 if __name__ == "__main__":
         app.run(port=5000, debug=True)
