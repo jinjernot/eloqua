@@ -5,9 +5,10 @@ from core.utils import save_json
 from core.bulk.bulk_contacts import batch_fetch_contacts_bulk
 from core.bulk.bulk_email_send import fetch_email_sends_bulk
 from core.bulk.bulk_bouncebacks import fetch_bouncebacks_bulk
+from core.rest.fetch_data import fetch_data 
 
-data_dir = "data"
-os.makedirs(data_dir, exist_ok=True)
+DATA_DIR = "data"
+os.makedirs(DATA_DIR, exist_ok=True)
 
 def fetch_and_save_data(target_date=None):
     if target_date:
@@ -20,7 +21,7 @@ def fetch_and_save_data(target_date=None):
 
     # Step 1: Fetch EmailSend activities
     email_sends = fetch_email_sends_bulk(start_str, end_str)
-    save_json(email_sends, os.path.join(data_dir, "email_sends.json"))
+    save_json(email_sends, os.path.join(DATA_DIR, "email_sends.json"))
     print(f"[INFO] Fetched {len(email_sends)} email sends.")
 
     if not email_sends:
@@ -42,11 +43,29 @@ def fetch_and_save_data(target_date=None):
 
     # Step 4: Fetch bouncebacks
     bouncebacks = fetch_bouncebacks_bulk(start_str, end_str)
-    save_json(bouncebacks, os.path.join(data_dir, "bouncebacks.json"))
+    save_json(bouncebacks, os.path.join(DATA_DIR, "bouncebacks.json"))
     print(f"[INFO] Fetched {len(bouncebacks)} bouncebacks.")
+
+    # Step 5: Fetch campaign data from REST endpoints
+    CAMPAIGN_ANALYSIS_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/CampaignAnalysis/1/Campaign"  # Replace with actual URL
+    CAMPAING_USERS_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/CampaignAnalysis/1/User"      # Replace with actual URL
+
+    campaign_analysis = fetch_data(CAMPAIGN_ANALYSIS_ENDPOINT, "campaign.json")
+    if "error" in campaign_analysis:
+        print(f"[ERROR] Failed to fetch campaign analysis: {campaign_analysis['error']}")
+    else:
+        print(f"[INFO] Fetched campaign analysis with {len(campaign_analysis.get('value', []))} records.")
+
+    campaign_users = fetch_data(CAMPAING_USERS_ENDPOINT, "campaign_users.json")
+    if "error" in campaign_users:
+        print(f"[ERROR] Failed to fetch campaign users: {campaign_users['error']}")
+    else:
+        print(f"[INFO] Fetched campaign users with {len(campaign_users.get('value', []))} records.")
 
     return {
         "email_sends": email_sends,
         "contact_activities": contact_activities,
-        "bouncebacks": bouncebacks
+        "bouncebacks": bouncebacks,
+        "campaign_analysis": campaign_analysis,
+        "campaign_users": campaign_users,
     }

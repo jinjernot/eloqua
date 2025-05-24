@@ -57,7 +57,7 @@ def fetch_bouncebacks_bulk(start_date, end_date):
                 "SmtpStatusCode": "{{Activity.Field(SmtpStatusCode)}}",
                 "SmtpMessage": "{{Activity.Field(SmtpMessage)}}"
             },
-            "filter": date_filter  # <-- Use the correctly formatted filter string here
+            "filter": date_filter 
         }
 
         save_debug_payload(export_payload, f"bounceback_export_payload_{start_date[:10]}.json")

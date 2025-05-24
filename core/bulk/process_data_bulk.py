@@ -29,21 +29,31 @@ def generate_daily_report(target_date):
     email_sends = data.get("email_sends", [])
     contact_activities = data.get("contact_activities", [])
     bouncebacks = data.get("bouncebacks", [])
+    campaign_analysis = data.get("campaign_analysis", {}).get("value", [])
+    campaign_users = data.get("campaign_users", {}).get("value", [])
 
+    # Prepare unique email sends (de-duplicate by assetId and contactId)
     seen = set()
     unique_email_sends = []
     for send in email_sends:
-        key = (send.get("assetId"), send.get("contactID"))
+        key = (send.get("assetId"), send.get("contactId"))
         if key not in seen:
             seen.add(key)
             unique_email_sends.append(send)
-            print(f"Unique email sends: {len(unique_email_sends)}")
+    print(f"Unique email sends: {len(unique_email_sends)}")
 
-    contact_ids = {str(send.get("contactID")) for send in unique_email_sends if send.get("contactID")}
+    # Get contact ids for enrichment
+    contact_ids = {str(send.get("contactId")) for send in unique_email_sends if send.get("contactId")}
     print(f"Contact IDs to enrich: {contact_ids}")
+
     enriched_contacts = batch_fetch_contacts_bulk(list(contact_ids), batch_size=20)
     contact_map = {str(c["id"]): c for c in enriched_contacts if c.get("id") is not None}
 
+    # Build campaign and user lookup maps
+    campaign_map = {c.get("eloquaCampaignId"): c for c in campaign_analysis if c.get("eloquaCampaignId") is not None}
+    user_map = {u.get("userID"): u.get("userName", "") for u in campaign_users if u.get("userID") is not None}
+
+    # Process bouncebacks for counts
     bounceback_counts = {}
     for bb in bouncebacks:
         cid = str(bb.get("ContactId") or bb.get("contactID") or "")
@@ -61,9 +71,10 @@ def generate_daily_report(target_date):
         elif "soft" in bb_type:
             bounceback_counts[key]["soft"] += 1
 
+    # Build report rows
     report_rows = []
     for send in unique_email_sends:
-        cid = str(send.get("contactID", ""))
+        cid = str(send.get("contactId", ""))
         contact = contact_map.get(cid, {})
 
         asset_id = send.get("assetId")
@@ -88,11 +99,24 @@ def generate_daily_report(target_date):
         except Exception:
             formatted_date = ""
 
+        # Lookup "Last Activated by User"
+        campaign_id = send.get("campaignId")
+        user = ""
+        if campaign_id:
+            try:
+                campaign_id_int = int(campaign_id)
+                campaign = campaign_map.get(campaign_id_int, {})
+                creator_id = campaign.get("campaignCreatedByUserId")  # ✅ Fixed field name
+                if creator_id:
+                    user = user_map.get(creator_id, "")
+            except (ValueError, TypeError):
+                pass  # Handle non-integer campaignId safely
+
         report_rows.append({
             "Email Name": send.get("assetName", ""),
             "Email ID": asset_id,
             "Email Subject Line": send.get("subjectLine", ""),
-            "Last Activated by User": "",  # Removed: Reporting API User enrichment
+            "Last Activated by User": user,
             "Total Delivered": total_delivered,
             "Total Hard Bouncebacks": total_hard_bouncebacks,
             "Total Sends": total_sends,

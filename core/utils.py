@@ -1,8 +1,9 @@
 import json
 import csv
+import os
 
 def save_json(data, filename):
-
+    os.makedirs(os.path.dirname(filename), exist_ok=True)  # Ensure directory exists
     with open(filename, "w", encoding="utf-8") as file:
         json.dump(data, file, ensure_ascii=False, indent=4)
 
