@@ -52,6 +52,6 @@ def generate_batch():
         "message": "Batch report generation complete",
         "files": generated_files
     })
-    6
+    
 if __name__ == "__main__":
         app.run(port=5000, debug=True)

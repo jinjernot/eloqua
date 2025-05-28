@@ -34,6 +34,15 @@ def generate_daily_report(target_date):
     email_clickthroughs = data.get("email_clickthroughs", {}).get("value", [])
     email_opens = data.get("email_opens", {}).get("value", [])
 
+    # NEW: map emailGroup by emailID for quick lookup
+    email_asset_data = data.get("email_asset_data", {}).get("value", [])
+    email_group_map = {}
+    for item in email_asset_data:
+        email_id = item.get("emailID")
+        if email_id is not None:
+            email_group_map[int(email_id)] = item.get("emailGroup", "")
+    print(f"Email groups mapped: {email_group_map}")
+
     # Prepare unique email sends (de-duplicate by assetId and contactId)
     seen = set()
     unique_email_sends = []
@@ -116,8 +125,13 @@ def generate_daily_report(target_date):
         cid = str(send.get("contactId", ""))
         contact = contact_map.get(cid, {})
 
-        asset_id = str(send.get("assetId"))
-        key = (asset_id, cid)
+        asset_id_raw = send.get("assetId")
+        try:
+            asset_id = int(asset_id_raw)
+        except (ValueError, TypeError):
+            asset_id = None
+
+        key = (str(asset_id), cid) if asset_id is not None else (None, cid)
         bb_counts = bounceback_counts.get(key, {"hard": 0, "soft": 0, "total": 0})
 
         total_sends = 1  # Since this row represents 1 send to 1 contact
@@ -166,9 +180,12 @@ def generate_daily_report(target_date):
             except (ValueError, TypeError):
                 pass
 
+        # NEW: lookup emailGroup for this assetId
+        email_group = email_group_map.get(asset_id, "") if asset_id is not None else ""
+
         report_rows.append({
             "Email Name": send.get("assetName", ""),
-            "Email ID": asset_id,
+            "Email ID": str(asset_id_raw),
             "Email Subject Line": send.get("subjectLine", ""),
             "Last Activated by User": user,
             "Total Delivered": total_delivered,
@@ -184,7 +201,7 @@ def generate_daily_report(target_date):
             "Unique Clickthrough Rate": round(unique_clickthrough_rate * 100, 2),
             "Delivered Rate": round(delivered_rate, 4),
             "Unique Open Rate": round(unique_open_rate * 100, 2),  # per contact: 0 or 100%
-            "Email Group": "",
+            "Email Group": email_group,
             "Email Send Date": formatted_date,
             "Email Address": contact.get("emailAddress", ""),
             "Contact Country": contact.get("country", ""),

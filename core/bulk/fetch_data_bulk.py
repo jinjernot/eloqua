@@ -115,7 +115,18 @@ def fetch_and_save_data(target_date=None):
         print(f"[ERROR] Failed to fetch campaign users: {campaign_users['error']}")
     else:
         print(f"[INFO] Fetched campaign users with {len(campaign_users.get('value', []))} records.")
+        
+        
+        
+    EMAIL_ASSET_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/FormSubmission/1/EmailAsset"
+    # NEW STEP: fetch from EMAIL_ASSET_ENDPOINT
+    email_asset_data = fetch_data(EMAIL_ASSET_ENDPOINT, "email_asset.json")
+    if "error" in email_asset_data:
+        print(f"[ERROR] Failed to fetch email asset data: {email_asset_data['error']}")
+    else:
+        print(f"[INFO] Fetched email asset data with {len(email_asset_data.get('value', []))} records.")
 
+    # finally return your dict, now including the new data
     return {
         "email_sends": email_sends,
         "contact_activities": contact_activities,
@@ -124,4 +135,5 @@ def fetch_and_save_data(target_date=None):
         "email_opens": email_opens,
         "campaign_analysis": campaign_analysis,
         "campaign_users": campaign_users,
+        "email_asset_data": email_asset_data,   # <-- added here
     }
