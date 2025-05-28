@@ -7,3 +7,4 @@ auth.py
 auth_pro.py
 *csv
 run_daily.py
+.venv
