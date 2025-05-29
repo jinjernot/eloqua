@@ -26,16 +26,25 @@ def callback():
 
 @app.route("/daily", methods=["GET"])
 def generate_batch():
-    # How many past days you want to generate reports for, including yesterday
-    days_back = 1
-    
-    # Yesterday date (UTC)
-    end_date = datetime.utcnow().date() - timedelta(days=1)
-    
+    date_str = request.args.get("date")
+
+    if date_str:
+        try:
+            # Validate and parse the input date
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+
+        dates_to_process = [target_date]
+    else:
+        # Default: run for yesterday only
+        days_back = 1
+        end_date = datetime.utcnow().date() - timedelta(days=1)
+        dates_to_process = [end_date - timedelta(days=i) for i in range(days_back)]
+
     generated_files = []
 
-    for i in range(days_back):
-        date = end_date - timedelta(days=i)
+    for date in dates_to_process:
         date_str = date.strftime("%Y-%m-%d")
         output_file = f"data/{date_str}.csv"
 
@@ -49,9 +58,9 @@ def generate_batch():
             generated_files.append(path)
 
     return jsonify({
-        "message": "Batch report generation complete",
+        "message": "Report generation complete",
         "files": generated_files
     })
-    
+        
 if __name__ == "__main__":
         app.run(port=5000, debug=True)

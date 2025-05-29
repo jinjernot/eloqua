@@ -197,10 +197,10 @@ def generate_daily_report(target_date):
             "Hard Bounceback Rate": int(hard_bounceback_rate * 100),
             "Soft Bounceback Rate": int(soft_bounceback_rate * 100),
             "Bounceback Rate": int(bounceback_rate * 100),
-            "Clickthrough Rate": round(clickthrough_rate * 100, 2),
-            "Unique Clickthrough Rate": round(unique_clickthrough_rate * 100, 2),
-            "Delivered Rate": round(delivered_rate, 4),
-            "Unique Open Rate": round(unique_open_rate * 100, 2),  # per contact: 0 or 100%
+            "Clickthrough Rate": round(clickthrough_rate * 100),
+            "Unique Clickthrough Rate": round(unique_clickthrough_rate * 100),
+            "Delivered Rate": int(delivered_rate * 100),
+            "Unique Open Rate": round(unique_open_rate * 100),  # per contact: 0 or 100%
             "Email Group": email_group,
             "Email Send Date": formatted_date,
             "Email Address": contact.get("emailAddress", ""),
