@@ -34,7 +34,6 @@ def generate_daily_report(target_date):
     email_clickthroughs = data.get("email_clickthroughs", {}).get("value", [])
     email_opens = data.get("email_opens", {}).get("value", [])
 
-    # NEW: map emailGroup by emailID for quick lookup
     email_asset_data = data.get("email_asset_data", {}).get("value", [])
     email_group_map = {}
     for item in email_asset_data:
@@ -43,7 +42,6 @@ def generate_daily_report(target_date):
             email_group_map[int(email_id)] = item.get("emailGroup", "")
     print(f"Email groups mapped: {email_group_map}")
 
-    # Prepare unique email sends (de-duplicate by assetId and contactId)
     seen = set()
     unique_email_sends = []
     for send in email_sends:
@@ -53,75 +51,64 @@ def generate_daily_report(target_date):
             unique_email_sends.append(send)
     print(f"Unique email sends: {len(unique_email_sends)}")
 
-    # Get contact ids for enrichment
     contact_ids = {str(send.get("contactId")) for send in unique_email_sends if send.get("contactId")}
     print(f"Contact IDs to enrich: {contact_ids}")
 
     enriched_contacts = batch_fetch_contacts_bulk(list(contact_ids), batch_size=20)
     contact_map = {str(c["id"]): c for c in enriched_contacts if c.get("id") is not None}
 
-    # Build campaign and user lookup maps
     campaign_map = {c.get("eloquaCampaignId"): c for c in campaign_analysis if c.get("eloquaCampaignId") is not None}
     user_map = {u.get("userID"): u.get("userName", "") for u in campaign_users if u.get("userID") is not None}
 
-    # Process bouncebacks for counts
     bounceback_counts = {}
     for bb in bouncebacks:
         cid = str(bb.get("ContactId") or bb.get("contactID") or "")
         asset_id = str(bb.get("AssetId") or bb.get("assetId") or "")
-
         if not cid or not asset_id:
             continue
-
         key = (asset_id, cid)
         bounceback_counts.setdefault(key, {"hard": 0, "soft": 0, "total": 0})
         bounceback_counts[key]["total"] += 1
-
         smtp_error = str(bb.get("SmtpErrorCode", ""))
         if smtp_error.startswith("5."):
             bounceback_counts[key]["hard"] += 1
         elif smtp_error.startswith("4."):
             bounceback_counts[key]["soft"] += 1
 
-    # Process clickthroughs
     click_map = {}
     unique_clicks_by_asset = {}
     print(f"Loaded {len(email_clickthroughs)} clickthrough records")
     for click in email_clickthroughs:
         asset_id = str(click.get("emailID"))
         cid = str(click.get("contactID"))
-
         if not asset_id or not cid:
             continue
-
         key = (asset_id, cid)
         click_map[key] = click_map.get(key, 0) + 1
-
         if asset_id not in unique_clicks_by_asset:
             unique_clicks_by_asset[asset_id] = set()
         unique_clicks_by_asset[asset_id].add(cid)
 
-    # Process opens
     open_map = {}
     unique_opens_by_asset = {}
     print(f"Loaded {len(email_opens)} open records")
     for open_evt in email_opens:
         asset_id = str(open_evt.get("emailID"))
         cid = str(open_evt.get("contactID"))
-
         if not asset_id or not cid:
             continue
-
         key = (asset_id, cid)
         open_map[key] = open_map.get(key, 0) + 1
-
         if asset_id not in unique_opens_by_asset:
             unique_opens_by_asset[asset_id] = set()
         unique_opens_by_asset[asset_id].add(cid)
 
-    # Build report rows
     report_rows = []
     for send in unique_email_sends:
+        email_address = send.get("emailAddress", "").lower()
+        if "@hp.com" in email_address:
+            continue  # Skip internal HP emails
+
         cid = str(send.get("contactId", ""))
         contact = contact_map.get(cid, {})
 
@@ -134,7 +121,7 @@ def generate_daily_report(target_date):
         key = (str(asset_id), cid) if asset_id is not None else (None, cid)
         bb_counts = bounceback_counts.get(key, {"hard": 0, "soft": 0, "total": 0})
 
-        total_sends = 1  # Since this row represents 1 send to 1 contact
+        total_sends = 1
         total_hard_bouncebacks = bb_counts["hard"]
         total_soft_bouncebacks = bb_counts["soft"]
         total_bouncebacks = bb_counts["total"]
@@ -146,20 +133,14 @@ def generate_daily_report(target_date):
         total_delivered = total_sends - total_bouncebacks
         delivered_rate = total_delivered / total_sends if total_sends else 0
 
-        # Clickthrough rates
         total_clicks = click_map.get(key, 0)
         clickthrough_rate = total_clicks / total_sends if total_sends else 0
-
-        # Per contact: 1 if the contact clicked at least once, else 0
         unique_clicks = 1 if total_clicks > 0 else 0
-        unique_clickthrough_rate = unique_clicks / total_sends  # This will be 1 or 0 per contact row
+        unique_clickthrough_rate = unique_clicks / total_sends
 
-        # Open rates - UPDATED to show per contact opens, not aggregate unique opens:
-        total_opens = open_map.get(key, 0)  # number of opens by this contact for this asset
-        # For Unique Opens, per contact perspective: 1 if opened at least once, else 0
+        total_opens = open_map.get(key, 0)
         unique_opens = 1 if total_opens > 0 else 0
-
-        unique_open_rate = unique_opens / total_sends  # This will be 1 or 0 per contact row
+        unique_open_rate = unique_opens / total_sends
 
         date_str = send.get("activityDate") or send.get("campaignResponseDate") or ""
         try:
@@ -167,7 +148,6 @@ def generate_daily_report(target_date):
         except Exception:
             formatted_date = ""
 
-        # Lookup "Last Activated by User"
         campaign_id = send.get("campaignId")
         user = ""
         if campaign_id:
@@ -180,7 +160,6 @@ def generate_daily_report(target_date):
             except (ValueError, TypeError):
                 pass
 
-        # NEW: lookup emailGroup for this assetId
         email_group = email_group_map.get(asset_id, "") if asset_id is not None else ""
 
         report_rows.append({
@@ -200,10 +179,10 @@ def generate_daily_report(target_date):
             "Clickthrough Rate": round(clickthrough_rate * 100),
             "Unique Clickthrough Rate": round(unique_clickthrough_rate * 100),
             "Delivered Rate": int(delivered_rate * 100),
-            "Unique Open Rate": round(unique_open_rate * 100),  # per contact: 0 or 100%
+            "Unique Open Rate": round(unique_open_rate * 100),
             "Email Group": email_group,
             "Email Send Date": formatted_date,
-            "Email Address": contact.get("emailAddress", ""),
+            "Email Address": email_address,
             "Contact Country": contact.get("country", ""),
             "HP Role": contact.get("hp_role", ""),
             "HP Partner Id": contact.get("hp_partner_id", ""),

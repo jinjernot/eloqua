@@ -26,7 +26,7 @@ def save_csv(data, filename):
         for row in data
     ]
 
-    with open(filename, "w", newline="", encoding="utf-8") as file:
+    with open(filename, "w", newline="", encoding="utf-8-sig") as file:
         writer = csv.DictWriter(file, fieldnames=keys, delimiter="\t")
         writer.writeheader()
         writer.writerows(sanitized_data)
