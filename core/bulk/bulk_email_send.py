@@ -95,7 +95,7 @@ def fetch_email_sends_bulk(start_date, end_date):
                 items = data.get("items", [])
                 all_items.extend(items)
 
-                if len(items) < limit:
+                if not items:
                     break  # Last page
 
                 offset += limit

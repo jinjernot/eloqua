@@ -97,7 +97,7 @@ def fetch_bouncebacks_bulk(start_date, end_date):
 
         all_items = []
         offset = 0
-        limit = 50
+        limit = 1000
 
         while True:
             paged_url = f"{base_data_url}?offset={offset}&limit={limit}"
