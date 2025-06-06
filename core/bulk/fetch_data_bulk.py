@@ -5,8 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from core.utils import save_json
 from core.bulk.bulk_contacts import batch_fetch_contacts_bulk
 from core.bulk.bulk_email_send import fetch_email_sends_bulk
-from core.bulk.bulk_bouncebacks import fetch_bouncebacks_bulk
-from core.rest.fetch_data import fetch_data
+# from core.bulk.bulk_bouncebacks import fetch_bouncebacks_bulk # <--- REMOVED THIS IMPORT
+from core.rest.fetch_data import fetch_data # <--- ENSURE THIS IMPORT IS PRESENT
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -40,10 +40,18 @@ def fetch_and_save_data(target_date=None):
     with ThreadPoolExecutor(max_workers=8) as executor: # You can adjust max_workers based on your system's capabilities and network
         # Submit bulk fetches first as they can take time due to polling
         email_sends_future = executor.submit(fetch_email_sends_bulk, start_str, end_str)
-        bouncebacks_future = executor.submit(fetch_bouncebacks_bulk, start_str, end_str)
+        
+        # --- MODIFICATION START: Fetch main bouncebacks from OData endpoint using fetch_data ---
+        # Filter by bounceBackDateHour, which is available in OData for bouncebacks
+        filter_str_bounceback = f"bounceBackDateHour ge {start_str} and bounceBackDateHour lt {end_str}"
+        bouncebacks_future = executor.submit(
+            fetch_data, BOUNCEBACK_OData_ENDPOINT, "bouncebacks_odata.json", extra_params={"$filter": filter_str_bounceback}
+        )
+        # --- MODIFICATION END ---
 
         # Submit all independent OData/REST fetches to run concurrently
-        preview_filter = f"bouncebackDateHour ge {start_str} and bouncebackDateHour lt {end_str}"
+        # The bounceback_preview can remain if you want a small sample for debugging.
+        preview_filter = f"bounceBackDateHour ge {start_str} and bounceBackDateHour lt {end_str}"
         bounceback_preview_future = executor.submit(
             fetch_data, BOUNCEBACK_OData_ENDPOINT, "email_bouncebacks_raw.json", extra_params={"$filter": preview_filter, "$top": 5}
         )
@@ -82,12 +90,15 @@ def fetch_and_save_data(target_date=None):
                 contact_activities = batch_fetch_contacts_bulk(contact_ids=contact_id_list, batch_size=20, max_workers=15)
                 print(f"[INFO] Fetched {len(contact_activities)} contact activities.")
             else:
-                print("[WARNING] No valid contact IDs found for batch processing.")
+                print("[WARNING] No valid contact IDs found.")
 
         # Collect results from other futures that were submitted in parallel
-        bouncebacks = bouncebacks_future.result()
+        # --- MODIFICATION START: Collect main bouncebacks from OData result ---
+        bouncebacks_raw_odata = bouncebacks_future.result()
+        bouncebacks = bouncebacks_raw_odata.get("value", []) # fetch_data returns {'value': [...]}, so extract the list
         save_json(bouncebacks, os.path.join(DATA_DIR, "bouncebacks.json"))
-        print(f"[INFO] Fetched {len(bouncebacks)} bouncebacks.")
+        print(f"[INFO] Fetched {len(bouncebacks)} bouncebacks from OData.")
+        # --- MODIFICATION END ---
 
         bounceback_preview = bounceback_preview_future.result()
         if "error" in bounceback_preview:
@@ -132,11 +143,10 @@ def fetch_and_save_data(target_date=None):
         else:
             print(f"[INFO] Fetched email asset data with {len(email_asset_data.get('value', []))} records.")
 
-
     return {
         "email_sends": email_sends,
         "contact_activities": contact_activities,
-        "bouncebacks": bouncebacks,
+        "bouncebacks": bouncebacks, # This will now be the OData fetched list
         "email_clickthroughs": email_clickthrough,
         "email_opens": email_opens,
         "campaign_analysis": campaign_analysis,
