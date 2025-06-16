@@ -20,6 +20,16 @@ def fetch_and_save_data(target_date=None):
     start_str = start.strftime("%Y-%m-%dT00:00:00Z")
     end_str = (start + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
 
+    # Extend the bounceback fetch window to 3 days to capture delayed bounces.
+    bounceback_end_date = start + timedelta(days=3)
+    end_str_bounceback = bounceback_end_date.strftime("%Y-%m-%dT00:00:00Z")
+
+    # Extend the window for opens and clickthroughs to capture delayed engagement.
+    # A 7-day window should be sufficient to capture most activity.
+    engagement_end_date = start + timedelta(days=30)
+    end_str_engagement = engagement_end_date.strftime("%Y-%m-%dT00:00:00Z")
+
+
     BOUNCEBACK_OData_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/ActivityDetails/1/EmailBounceback"
     CLICKTHROUGH_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/ActivityDetails/1/EmailClickthrough"
     EMAIL_OPEN_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/ActivityDetails/1/EmailOpen"
@@ -43,7 +53,7 @@ def fetch_and_save_data(target_date=None):
         
         # --- MODIFICATION START: Fetch main bouncebacks from OData endpoint using fetch_data ---
         # Filter by bounceBackDateHour, which is available in OData for bouncebacks
-        filter_str_bounceback = f"bounceBackDateHour ge {start_str} and bounceBackDateHour lt {end_str}"
+        filter_str_bounceback = f"bounceBackDateHour ge {start_str} and bounceBackDateHour lt {end_str_bounceback}"
         bouncebacks_future = executor.submit(
             fetch_data, BOUNCEBACK_OData_ENDPOINT, "bouncebacks_odata.json", extra_params={"$filter": filter_str_bounceback}
         )
@@ -56,12 +66,14 @@ def fetch_and_save_data(target_date=None):
             fetch_data, BOUNCEBACK_OData_ENDPOINT, "email_bouncebacks_raw.json", extra_params={"$filter": preview_filter, "$top": 5}
         )
 
-        filter_str = f"clickDateHour ge {start_str} and clickDateHour lt {end_str}"
+        # --- MODIFICATION FOR CLICKTHROUGHS: Use the extended engagement window ---
+        filter_str = f"clickDateHour ge {start_str} and clickDateHour lt {end_str_engagement}"
         email_clickthrough_future = executor.submit(
             fetch_data, CLICKTHROUGH_ENDPOINT, "email_clickthrough.json", extra_params={"$filter": filter_str}
         )
 
-        open_filter_str = f"openDateHour ge {start_str} and openDateHour lt {end_str}"
+        # --- MODIFICATION FOR OPENS: Use the extended engagement window ---
+        open_filter_str = f"openDateHour ge {start_str} and openDateHour lt {end_str_engagement}"
         email_opens_future = executor.submit(
             fetch_data, EMAIL_OPEN_ENDPOINT, "email_open.json", extra_params={"$filter": open_filter_str}
         )
