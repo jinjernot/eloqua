@@ -31,7 +31,7 @@ def generate_daily_report(target_date):
 
     email_sends = data.get("email_sends", [])
     contact_activities = data.get("contact_activities", [])
-    bouncebacks = data.get("bouncebacks", []) 
+    bouncebacks = data.get("bouncebacks", [])
     campaign_analysis = data.get("campaign_analysis", {}).get("value", [])
     campaign_users = data.get("campaign_users", {}).get("value", [])
     email_clickthroughs = data.get("email_clickthroughs", {}).get("value", [])
@@ -67,7 +67,7 @@ def generate_daily_report(target_date):
         bounceback_counts.setdefault(key, {"hard": 0, "soft": 0, "total": 0})
         bounceback_counts[key]["total"] += 1
 
-        is_hard_bounceback_flag = bb.get("isHardBounceback") 
+        is_hard_bounceback_flag = bb.get("isHardBounceback")
 
         if is_hard_bounceback_flag is True:
             bounceback_counts[key]["hard"] += 1
@@ -176,129 +176,36 @@ def generate_daily_report(target_date):
                     user = user_map.get(creator_id, "")
             except (ValueError, TypeError):
                 pass
-        email_group = email_group_map.get(asset_id, "") if asset_id is not None else ""
+        
+        if user:
+            email_group = email_group_map.get(asset_id, "") if asset_id is not None else ""
 
-        report_rows.append({
-            "Email Name": email_name,
-            "Email ID": str(asset_id_raw),
-            "Email Subject Line": email_subject,
-            "Last Activated by User": user,
-            "Total Delivered": total_delivered,
-            "Total Hard Bouncebacks": total_hard_bouncebacks,
-            "Total Sends": total_sends,
-            "Total Soft Bouncebacks": total_soft_bouncebacks,
-            "Total Bouncebacks": total_bouncebacks,
-            "Unique Opens": unique_opens,
-            "Hard Bounceback Rate": int(hard_bounceback_rate * 100),
-            "Soft Bounceback Rate": int(soft_bounceback_rate * 100),
-            "Bounceback Rate": int(bounceback_rate * 100),
-            "Clickthrough Rate": round(clickthrough_rate * 100),
-            "Unique Clickthrough Rate": round(unique_clickthrough_rate * 100),
-            "Delivered Rate": int(delivered_rate * 100),
-            "Unique Open Rate": round(unique_open_rate * 100),
-            "Email Group": email_group,
-            "Email Send Date": formatted_date,
-            "Email Address": email_address,
-            "Contact Country": contact.get("country", ""),
-            "HP Role": contact.get("hp_role", ""),
-            "HP Partner Id": contact.get("hp_partner_id", ""),
-            "Partner Name": contact.get("partner_name", ""),
-            "Market": contact.get("market", ""),
-        })
-
-    all_indirect_engagements = {}
-    for open_evt in email_opens:
-        asset_id_raw = str(open_evt.get("emailID"))
-        cid = str(open_evt.get("contactID"))
-        if not asset_id_raw or not cid:
-            continue
-        key = (asset_id_raw, cid)
-        if key not in processed_keys:
-            all_indirect_engagements.setdefault(key, {
-                "Email ID": asset_id_raw,
-                "Email Address": open_evt.get("emailAddress", "").lower(),
-                "Contact ID": cid,
-                "Last Activity Date": open_evt.get("activityDate") or open_evt.get("openDateHour")
+            report_rows.append({
+                "Email Name": email_name,
+                "Email ID": str(asset_id_raw),
+                "Email Subject Line": email_subject,
+                "Last Activated by User": user,
+                "Total Delivered": total_delivered,
+                "Total Hard Bouncebacks": total_hard_bouncebacks,
+                "Total Sends": total_sends,
+                "Total Soft Bouncebacks": total_soft_bouncebacks,
+                "Total Bouncebacks": total_bouncebacks,
+                "Unique Opens": unique_opens,
+                "Hard Bounceback Rate": int(hard_bounceback_rate * 100),
+                "Soft Bounceback Rate": int(soft_bounceback_rate * 100),
+                "Bounceback Rate": int(bounceback_rate * 100),
+                "Clickthrough Rate": round(clickthrough_rate * 100),
+                "Unique Clickthrough Rate": round(unique_clickthrough_rate * 100),
+                "Delivered Rate": int(delivered_rate * 100),
+                "Unique Open Rate": round(unique_open_rate * 100),
+                "Email Group": email_group,
+                "Email Send Date": formatted_date,
+                "Email Address": email_address,
+                "Contact Country": contact.get("country", ""),
+                "HP Role": contact.get("hp_role", ""),
+                "HP Partner Id": contact.get("hp_partner_id", ""),
+                "Partner Name": contact.get("partner_name", ""),
+                "Market": contact.get("market", ""),
             })
-
-    for click in email_clickthroughs:
-        asset_id_raw = str(click.get("emailID"))
-        cid = str(click.get("contactID"))
-        if not asset_id_raw or not cid:
-            continue
-        key = (asset_id_raw, cid)
-        if key not in processed_keys:
-            all_indirect_engagements.setdefault(key, {
-                "Email ID": asset_id_raw,
-                "Email Address": click.get("emailAddress", "").lower(),
-                "Contact ID": cid,
-                "Last Activity Date": click.get("activityDate") or click.get("clickDateHour")
-            })
-            if all_indirect_engagements[key]["Last Activity Date"] and \
-               (click.get("activityDate") or click.get("clickDateHour")) and \
-               parser.parse(click.get("activityDate") or click.get("clickDateHour")) > \
-               parser.parse(all_indirect_engagements[key]["Last Activity Date"]):
-                all_indirect_engagements[key]["Last Activity Date"] = click.get("activityDate") or click.get("clickDateHour")
-
-    for key, engagement_data in all_indirect_engagements.items():
-        date_str = engagement_data["Last Activity Date"] or ""
-        try:
-            if not date_str or parser.parse(date_str).date() != target_date_obj:
-                continue
-            formatted_date = parser.parse(date_str).strftime("%Y-%m-%d %I:%M:%S %p")
-        except (ValueError, TypeError):
-            continue
-
-        email_name, email_subject_line = "", ""
-        asset_id_raw = engagement_data["Email ID"]
-        for asset in email_asset_data:
-            if str(asset.get("emailID")) == asset_id_raw:
-                email_name = asset.get("emailName", "")
-                email_subject_line = asset.get("subject", "")
-                email_group = asset.get("emailGroup", "")
-                break
-        
-        if not email_name or not email_subject_line:
-            continue
-
-        email_address = engagement_data["Email Address"]
-        if "@hp.com" in email_address:
-            continue
-
-        cid = engagement_data["Contact ID"]
-        contact = contact_map.get(cid, {})
-        
-        total_clicks = click_map.get(key, 0)
-        unique_clicks = 1 if total_clicks > 0 else 0
-        total_opens = open_map.get(key, 0)
-        unique_opens = 1 if total_opens > 0 else 0
-        
-        report_rows.append({
-            "Email Name": email_name,
-            "Email ID": asset_id_raw,
-            "Email Subject Line": email_subject_line,
-            "Last Activated by User": "",
-            "Total Delivered": 0,
-            "Total Hard Bouncebacks": 0,
-            "Total Sends": 0,
-            "Total Soft Bouncebacks": 0,
-            "Total Bouncebacks": 0,
-            "Unique Opens": unique_opens,
-            "Hard Bounceback Rate": 0,
-            "Soft Bounceback Rate": 0,
-            "Bounceback Rate": 0,
-            "Clickthrough Rate": 0,
-            "Unique Clickthrough Rate": 0,
-            "Delivered Rate": 0,
-            "Unique Open Rate": 0,
-            "Email Group": email_group,
-            "Email Send Date": formatted_date,
-            "Email Address": email_address,
-            "Contact Country": contact.get("country", ""),
-            "HP Role": contact.get("hp_role", ""),
-            "HP Partner Id": contact.get("hp_partner_id", ""),
-            "Partner Name": contact.get("partner_name", ""),
-            "Market": contact.get("market", ""),
-        })
 
     return save_csv(report_rows, f"{target_date}.csv")

@@ -20,8 +20,8 @@ def fetch_and_save_data(target_date=None):
     start_str = start.strftime("%Y-%m-%dT00:00:00Z")
     end_str = (start + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
 
-    # Extend the bounceback fetch window to 3 days to capture delayed bounces.
-    bounceback_end_date = start + timedelta(days=3)
+    # Extend the bounceback fetch window to 7 days to capture delayed bounces.
+    bounceback_end_date = start + timedelta(days=7)
     end_str_bounceback = bounceback_end_date.strftime("%Y-%m-%dT00:00:00Z")
 
     # Extend the window for opens and clickthroughs to capture delayed engagement.
