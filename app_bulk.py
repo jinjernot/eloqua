@@ -45,7 +45,7 @@ def generate_batch():
         dates_to_process = [target_date]
     else:
         # Default: run for yesterday only
-        days_back = 1
+        days_back = 10
         end_date = datetime.utcnow().date() - timedelta(days=1)
         dates_to_process = [end_date - timedelta(days=i) for i in range(days_back)]
 

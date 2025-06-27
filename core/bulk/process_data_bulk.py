@@ -65,14 +65,14 @@ def generate_daily_report(target_date):
         bounceback_keys.add(key)
 
         bounceback_counts.setdefault(key, {"hard": 0, "soft": 0, "total": 0})
-        bounceback_counts[key]["total"] += 1
+        bounceback_counts[key]["total"] = 1
 
         is_hard_bounceback_flag = bb.get("isHardBounceback")
 
         if is_hard_bounceback_flag is True:
-            bounceback_counts[key]["hard"] += 1
+            bounceback_counts[key]["hard"] = 1
         elif is_hard_bounceback_flag is False:
-            bounceback_counts[key]["soft"] += 1
+            bounceback_counts[key]["soft"] = 1
 
     non_bounce_email_sends = [send for send in unique_email_sends
                               if (str(send.get("assetId")), str(send.get("contactId"))) not in bounceback_keys]
@@ -157,13 +157,23 @@ def generate_daily_report(target_date):
         hard_bounceback_rate = (total_hard_bouncebacks / total_sends) if total_sends else 0
         soft_bounceback_rate = (total_soft_bouncebacks / total_sends) if total_sends else 0
         delivered_rate = (total_delivered / total_sends) if total_sends else 0
-        total_clicks = click_map.get(key, 0)
-        unique_clicks = 1 if total_clicks > 0 else 0
-        clickthrough_rate = (total_clicks / total_sends) if total_sends else 0
-        unique_clickthrough_rate = (unique_clicks / total_sends) if total_sends else 0
-        total_opens = open_map.get(key, 0)
-        unique_opens = 1 if total_opens > 0 else 0
-        unique_open_rate = (unique_opens / total_sends) if total_sends else 0
+
+        if key in bounceback_keys:
+            total_clicks = 0
+            unique_clicks = 0
+            clickthrough_rate = 0
+            unique_clickthrough_rate = 0
+            total_opens = 0
+            unique_opens = 0
+            unique_open_rate = 0
+        else:
+            total_clicks = click_map.get(key, 0)
+            unique_clicks = 1 if total_clicks > 0 else 0
+            clickthrough_rate = (total_clicks / total_sends) if total_sends else 0
+            unique_clickthrough_rate = (unique_clicks / total_sends) if total_sends else 0
+            total_opens = open_map.get(key, 0)
+            unique_opens = 1 if total_opens > 0 else 0
+            unique_open_rate = (unique_opens / total_sends) if total_sends else 0
 
         campaign_id = send.get("campaignId")
         user = ""
@@ -208,4 +218,4 @@ def generate_daily_report(target_date):
                 "Market": contact.get("market", ""),
             })
 
-    return save_csv(report_rows, f"{target_date}.csv")
+    return save_csv(report_rows, f"data/{target_date}.csv")
