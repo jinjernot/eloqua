@@ -1,6 +1,7 @@
 import boto3
 import os
 from botocore.exceptions import NoCredentialsError, ClientError
+from config import S3_REGION # Import the new region variable
 
 def ping_s3_bucket(bucket_name):
     """
@@ -15,10 +16,10 @@ def ping_s3_bucket(bucket_name):
     Returns:
         tuple: (bool, str) where bool is True for success and str is a status message.
     """
-    print(f"[INFO] Pinging S3 bucket '{bucket_name}' to check status...")
+    print(f"[INFO] Pinging S3 bucket '{bucket_name}' in region '{S3_REGION}' to check status...")
     try:
-        # Instantiate the client with no credentials; Boto3 finds them automatically.
-        s3_client = boto3.client('s3')
+        # Instantiate the client with the specified region
+        s3_client = boto3.client('s3', region_name=S3_REGION)
         
         # 'head_bucket' is a lightweight operation to check for bucket existence and permissions.
         s3_client.head_bucket(Bucket=bucket_name)
@@ -49,13 +50,13 @@ def ping_s3_bucket(bucket_name):
         return False, str(e)
 
 
-# The upload_to_s3 function remains exactly the same as before.
 def upload_to_s3(file_path, bucket_name, s3_folder):
     """
     Uploads a file to a specific folder in an S3 bucket.
     """
     try:
-        s3_client = boto3.client('s3')
+        # Also specify the region here for consistency
+        s3_client = boto3.client('s3', region_name=S3_REGION)
         file_name = os.path.basename(file_path)
         s3_key = f"{s3_folder}/{file_name}"
         s3_client.upload_file(file_path, bucket_name, s3_key)

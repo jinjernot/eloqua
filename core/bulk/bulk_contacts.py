@@ -129,8 +129,11 @@ def fetch_contacts_bulk(contact_ids, batch_index=None):
         logging.exception("Error fetching contacts bulk: %s", e)
         return []
 
-def batch_fetch_contacts_bulk(contact_ids, batch_size=30, max_workers=15):
-    """Fetch contacts in batches using ThreadPoolExecutor; skips @hp.com emails."""
+def batch_fetch_contacts_bulk(contact_ids, batch_size=30, max_workers=20):
+    """
+    Fetch contacts in batches using ThreadPoolExecutor.
+    Tune batch_size and max_workers for performance.
+    """
     from threading import Lock
 
     def safe_fetch(chunk, batch_index):
