@@ -14,10 +14,34 @@ DEBUG_MODE = True
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def chunk_list(full_list, chunk_size):
-    """Split a list into chunks of a specific size."""
-    for i in range(0, len(full_list), chunk_size):
-        yield full_list[i:i + chunk_size]
+
+def smart_chunk_contacts(contact_ids, max_chars=1000):
+    """
+    Chunks a list of contact IDs into batches based on the Eloqua filter
+    character limit, not a fixed number of IDs.
+    """
+    chunks, current_chunk, current_len = [], [], 0
+    for cid in contact_ids:
+        # Clause for a Contact.Id filter
+        clause = f"'{{{{Contact.Id}}}}' = '{cid}'"
+        
+        # Length of the clause + ' OR ' (4 chars) if not the first item
+        added_len = len(clause) + (4 if current_chunk else 0)
+        
+        if current_len + added_len > max_chars:
+            # Current chunk is full, start a new one
+            chunks.append(current_chunk)
+            current_chunk = [cid]
+            current_len = len(clause)
+        else:
+            # Add to the current chunk
+            current_chunk.append(cid)
+            current_len += added_len
+            
+    if current_chunk:
+        chunks.append(current_chunk) # Add the last chunk
+    return chunks
+
 
 def build_contact_id_filter(contact_ids):
     """Builds a valid Eloqua Bulk API filter using OR comparisons for Contact.Id."""
@@ -129,10 +153,10 @@ def fetch_contacts_bulk(contact_ids, batch_index=None):
         logging.exception("Error fetching contacts bulk: %s", e)
         return []
 
-def batch_fetch_contacts_bulk(contact_ids, batch_size=30, max_workers=20):
+def batch_fetch_contacts_bulk(contact_ids, max_workers=20):
     """
     Fetch contacts in batches using ThreadPoolExecutor.
-    Tune batch_size and max_workers for performance.
+    Uses smart_chunk_contacts to create batches based on filter length.
     """
     from threading import Lock
 
@@ -150,13 +174,17 @@ def batch_fetch_contacts_bulk(contact_ids, batch_size=30, max_workers=20):
     futures = []
     lock = Lock()
 
-    total_batches = (len(contact_ids) + batch_size - 1) // batch_size
+    # Use smart_chunk_contacts instead of chunk_list
+    contact_batches = smart_chunk_contacts(contact_ids)
+    total_batches = len(contact_batches)
     completed_batches = 0
 
-    logging.info("Fetching %d contacts in parallel using %d threads...", len(contact_ids), max_workers)
+    logging.info("Fetching %d contacts in parallel (%d batches) using %d threads...", 
+                 len(contact_ids), total_batches, max_workers)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for idx, chunk in enumerate(chunk_list(contact_ids, batch_size), start=1):
+        # Use the new contact_batches
+        for idx, chunk in enumerate(contact_batches, start=1):
             futures.append(executor.submit(safe_fetch, chunk, idx))
 
         for future in as_completed(futures):

@@ -38,9 +38,33 @@ def fetch_email_sends_bulk(start_date, end_date):
         # Construct filter
         date_filter = f"'{{{{Activity.Type}}}}' = 'EmailSend' AND '{{{{Activity.CreatedAt}}}}' >= '{start_date}' AND '{{{{Activity.CreatedAt}}}}' < '{end_date}'"
 
+        # --- START OF MODIFIED SECTION ---
+        #
+        # Using the exact contact fields you provided, prefixed with 'Activity.Contact.Field'
+        #
+        COMBINED_EMAIL_SEND_FIELDS = {
+            # Standard Activity Fields
+            "activityDate": "{{Activity.CreatedAt}}",
+            "assetId": "{{Activity.Asset.Id}}",
+            "assetName": "{{Activity.Asset.Name}}",
+            "campaignId": "{{Activity.Campaign.Id}}",
+            "contactId": "{{Activity.Contact.Id}}",
+            "emailAddress": "{{Activity.Field(EmailAddress)}}", # This is the email used for the send
+            "subjectLine": "{{Activity.Field(SubjectLine)}}",
+
+            # NEW: Embedded Contact Fields (Corrected with your info)
+            "contact_country": "{{Activity.Contact.Field(C_Country)}}",
+            "contact_hp_role": "{{Activity.Contact.Field(C_HP_Role1)}}",
+            "contact_hp_partner_id": "{{Activity.Contact.Field(C_HP_PartnerID1)}}",
+            "contact_partner_name": "{{Activity.Contact.Field(C_Partner_Name1)}}",
+            "contact_market": "{{Activity.Contact.Field(C_Market1)}}"
+        }
+        # --- END OF MODIFIED SECTION ---
+
+
         export_payload = {
-            "name": f"Bulk_EmailSend_{start_date[:10]}",
-            "fields": EMAIL_SEND_FIELDS,
+            "name": f"Bulk_EmailSend_with_Contacts_{start_date[:10]}",
+            "fields": COMBINED_EMAIL_SEND_FIELDS, # Use the new combined fields
             "filter": date_filter
         }
 
@@ -50,7 +74,7 @@ def fetch_email_sends_bulk(start_date, end_date):
         export_resp = requests.post(BULK_ACTIVITY_EXPORT_URL, headers=headers, json=export_payload)
         export_resp.raise_for_status()
         export_uri = export_resp.json().get("uri")
-        logging.info("Created EmailSend export: %s", export_uri)
+        logging.info("Created EmailSend export (with contact fields): %s", export_uri)
 
         # Step 2: Start sync
         sync_resp = requests.post(BULK_SYNC_URL, headers=headers, json={"syncedInstanceUri": export_uri})
@@ -81,7 +105,7 @@ def fetch_email_sends_bulk(start_date, end_date):
 
         all_items = []
         offset = 0
-        limit = 50
+        limit = 5000 # Increase limit for bulk
 
         while True:
             paged_url = f"{base_data_url}?offset={offset}&limit={limit}"
@@ -95,7 +119,7 @@ def fetch_email_sends_bulk(start_date, end_date):
                 items = data.get("items", [])
                 all_items.extend(items)
 
-                if not items:
+                if not data.get("hasMore"): # Use 'hasMore' for bulk API
                     break  # Last page
 
                 offset += limit
