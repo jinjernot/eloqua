@@ -1,15 +1,35 @@
 # app_bulk.py
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 from auth import get_access_token
-from config import * # Imports all settings, including the new SAVE_LOCALLY toggle
+from config import *
 from core.bulk.process_data_bulk import generate_daily_report
 from datetime import datetime, timedelta
 import os
-# Import both S3 utility functions
+import logging
+import uuid
 from core.aws.s3_utils import upload_to_s3, ping_s3_bucket
 
 app = Flask(__name__)
+
+# Configure logging
+handler = logging.StreamHandler()
+handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(request_id)s - %(message)s')
+handler.setFormatter(formatter)
+app.logger.addHandler(handler)
+app.logger.setLevel(logging.INFO)
+
+class RequestIdFilter(logging.Filter):
+    def filter(self, record):
+        record.request_id = g.get('request_id', 'N/A')
+        return True
+
+app.logger.addFilter(RequestIdFilter())
+
+@app.before_request
+def before_request():
+    g.request_id = str(uuid.uuid4())
 
 @app.route("/")
 def home():
@@ -29,15 +49,14 @@ def callback():
 
 @app.route("/daily", methods=["GET"])
 def generate_batch():
+    app.logger.info("Daily report generation request received.")
 
-    # --- LOCAL TESTING CHECK ---
-    # Only ping and upload to S3 if SAVE_LOCALLY is False
     if not SAVE_LOCALLY:
-        # 2. Ping S3 Bucket
         is_s3_ok, s3_message = ping_s3_bucket(S3_BUCKET_NAME)
         if not is_s3_ok:
+            app.logger.error("S3 bucket check failed: %s", s3_message)
             return jsonify({"error": "S3 bucket check failed", "details": s3_message}), 503
-    # -------------------------
+
 
     date_str = request.args.get("date")
 
@@ -45,11 +64,11 @@ def generate_batch():
         try:
             target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         except ValueError:
+            app.logger.error("Invalid date format: %s", date_str)
             return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
         dates_to_process = [target_date]
     else:
-        # Default: run for yesterday only
-        days_back = 10
+        days_back = 1
         end_date = datetime.utcnow().date() - timedelta(days=1)
         dates_to_process = [end_date - timedelta(days=i) for i in range(days_back)]
 
@@ -61,29 +80,30 @@ def generate_batch():
         output_file = f"data/{date_str}.csv"
 
         if os.path.exists(output_file):
-            print(f"[INFO] Skipping {date_str}, report already exists.")
+            app.logger.info("Skipping %s, report already exists.", date_str)
             continue
 
-        print(f"[INFO] Generating report for {date_str}")
+        app.logger.info("Generating report for %s", date_str)
         path = generate_daily_report(date_str)
         if path:
             generated_files.append(path)
             
-            # --- LOCAL TESTING CHECK ---
+
             if SAVE_LOCALLY:
-                print(f"[INFO] File saved locally at: {path}. Skipping S3 upload.")
+                app.logger.info("File saved locally at: %s. Skipping S3 upload.", path)
                 statuses.append({
                     "file": path,
                     "status": "Saved locally"
                 })
             else:
-                print(f"[INFO] Uploading {path} to S3 bucket: {S3_BUCKET_NAME}")
+                app.logger.info("Uploading %s to S3 bucket: %s", path, S3_BUCKET_NAME)
                 upload_success = upload_to_s3(path, S3_BUCKET_NAME, S3_FOLDER_PATH)
                 statuses.append({
                     "file": path,
                     "uploaded_to_s3": upload_success
                 })
 
+    app.logger.info("Report generation complete.")
     return jsonify({
         "message": "Report generation complete",
         "mode": "local_save" if SAVE_LOCALLY else "s3_upload",

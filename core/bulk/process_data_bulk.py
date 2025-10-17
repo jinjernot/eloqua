@@ -1,29 +1,33 @@
 import time
 import requests
 from dateutil import parser
-
+import logging
 from core.bulk.fetch_data_bulk import fetch_and_save_data
 from core.bulk.bulk_contacts import batch_fetch_contacts_bulk
 from core.utils import save_csv
 
+logger = logging.getLogger(__name__)
 
 def fetch_data_with_retries(fetch_function, max_retries=3):
     for attempt in range(max_retries):
         try:
             return fetch_function()
         except requests.exceptions.ConnectionError as e:
-            print(f"Connection error: {e}. Retrying {attempt + 1}/{max_retries}...")
+            logger.warning("Connection error: %s. Retrying %d/%d...", e, attempt + 1, max_retries)
             time.sleep(2 ** attempt)
         except requests.exceptions.RequestException as e:
-            print(f"Request failed: {e}")
+            logger.error("Request failed: %s", e)
             break
     return None
 
 
 def generate_daily_report(target_date):
+    start_time = time.time()
+    logger.info("Starting daily report generation for %s", target_date)
+
     data = fetch_data_with_retries(lambda: fetch_and_save_data(target_date))
     if not data:
-        print("Failed to fetch data after retries.")
+        logger.error("Failed to fetch data after retries.")
         return None
 
     # Parse the target date once for efficient comparison
@@ -37,12 +41,15 @@ def generate_daily_report(target_date):
     email_opens = data.get("email_opens", {}).get("value", [])
     email_asset_data = data.get("email_asset_data", {}).get("value", [])
 
+    logger.info("Fetched %d email sends, %d bouncebacks, %d campaign analysis records, %d campaign users, %d email clickthroughs, %d email opens, %d email asset data records.",
+                len(email_sends), len(bouncebacks), len(campaign_analysis), len(campaign_users), len(email_clickthroughs), len(email_opens), len(email_asset_data))
+
     email_group_map = {int(item["emailID"]): item.get("emailGroup", "") for item in email_asset_data if item.get("emailID")}
-    print(f"Email groups mapped: {len(email_group_map)}")
+    logger.info("Email groups mapped: %d", len(email_group_map))
 
     # Use a dictionary to get unique email sends based on a composite key
     unique_email_sends = list({(str(s.get("assetId")), str(s.get("contactId"))): s for s in email_sends}.values())
-    print(f"Unique email sends: {len(unique_email_sends)}")
+    logger.info("Unique email sends: %d", len(unique_email_sends))
 
     bounceback_keys = set()
     bounceback_counts = {}
@@ -63,8 +70,12 @@ def generate_daily_report(target_date):
     all_contact_ids.update(str(open_evt.get("contactID")) for open_evt in email_opens if open_evt.get("contactID"))
     all_contact_ids.update(str(click.get("contactID")) for click in email_clickthroughs if click.get("contactID"))
 
-    print(f"Contact IDs to enrich: {len(all_contact_ids)}")
+    logger.info("Contact IDs to enrich: %d", len(all_contact_ids))
+    enrich_start_time = time.time()
     enriched_contacts = batch_fetch_contacts_bulk(list(all_contact_ids), batch_size=30)
+    enrich_end_time = time.time()
+    logger.info("Enriched %d contacts in %.2f seconds.", len(enriched_contacts), enrich_end_time - enrich_start_time)
+
     contact_map = {str(c["id"]): c for c in enriched_contacts if c.get("id")}
 
     campaign_map = {c.get("eloquaCampaignId"): c for c in campaign_analysis if c.get("eloquaCampaignId")}
@@ -83,6 +94,7 @@ def generate_daily_report(target_date):
             open_map[key] = open_map.get(key, 0) + 1
 
     report_rows = []
+    processing_start_time = time.time()
     for send in unique_email_sends:
         date_str = send.get("activityDate") or send.get("campaignResponseDate") or ""
         try:
@@ -146,5 +158,11 @@ def generate_daily_report(target_date):
                 "Partner Name": contact_map.get(cid, {}).get("partner_name", ""),
                 "Market": contact_map.get(cid, {}).get("market", ""),
             })
+    processing_end_time = time.time()
+    logger.info("Processed %d report rows in %.2f seconds.", len(report_rows), processing_end_time - processing_start_time)
 
-    return save_csv(report_rows, f"data/{target_date}.csv")
+    output_file = f"data/{target_date}.csv"
+    save_csv(report_rows, output_file)
+    end_time = time.time()
+    logger.info("Daily report generation for %s completed in %.2f seconds. Report saved to %s", target_date, end_time - start_time, output_file)
+    return output_file
