@@ -8,8 +8,7 @@ from auth import get_valid_access_token
 from core.utils import save_json
 from config import *
 
-# Toggle debug mode for saving payloads and responses
-DEBUG_MODE = True
+DEBUG_MODE = False
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -22,24 +21,20 @@ def smart_chunk_contacts(contact_ids, max_chars=1000):
     """
     chunks, current_chunk, current_len = [], [], 0
     for cid in contact_ids:
-        # Clause for a Contact.Id filter
         clause = f"'{{{{Contact.Id}}}}' = '{cid}'"
         
-        # Length of the clause + ' OR ' (4 chars) if not the first item
         added_len = len(clause) + (4 if current_chunk else 0)
         
         if current_len + added_len > max_chars:
-            # Current chunk is full, start a new one
             chunks.append(current_chunk)
             current_chunk = [cid]
             current_len = len(clause)
         else:
-            # Add to the current chunk
             current_chunk.append(cid)
             current_len += added_len
             
     if current_chunk:
-        chunks.append(current_chunk) # Add the last chunk
+        chunks.append(current_chunk)
     return chunks
 
 

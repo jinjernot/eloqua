@@ -112,7 +112,7 @@ def fetch_bouncebacks_bulk(start_date, end_date):
                 all_items.extend(items)
 
                 if len(items) < limit:
-                    break  # Last page
+                    break
 
                 offset += limit
 
@@ -120,7 +120,6 @@ def fetch_bouncebacks_bulk(start_date, end_date):
                 logging.error("JSON parse error at offset %d: %s", offset, json_err)
                 break
 
-        # Optional: Save full debug
         if DEBUG_MODE:
             os.makedirs("debug_bouncebacks", exist_ok=True)
             filename = f"debug_bouncebacks/bouncebacks_{start_date[:10]}.json"

@@ -7,8 +7,7 @@ from auth import get_valid_access_token
 from core.utils import save_json
 from config import *
 
-# Toggle debug mode
-DEBUG_MODE = True
+DEBUG_MODE = False
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -35,13 +34,8 @@ def fetch_email_sends_bulk(start_date, end_date):
             "Accept": "application/json"
         }
 
-        # Construct filter
         date_filter = f"'{{{{Activity.Type}}}}' = 'EmailSend' AND '{{{{Activity.CreatedAt}}}}' >= '{start_date}' AND '{{{{Activity.CreatedAt}}}}' < '{end_date}'"
 
-        # --- START OF MODIFIED SECTION ---
-        #
-        # Using the exact contact fields you provided, prefixed with 'Activity.Contact.Field'
-        #
         COMBINED_EMAIL_SEND_FIELDS = {
             # Standard Activity Fields
             "activityDate": "{{Activity.CreatedAt}}",
@@ -49,18 +43,15 @@ def fetch_email_sends_bulk(start_date, end_date):
             "assetName": "{{Activity.Asset.Name}}",
             "campaignId": "{{Activity.Campaign.Id}}",
             "contactId": "{{Activity.Contact.Id}}",
-            "emailAddress": "{{Activity.Field(EmailAddress)}}", # This is the email used for the send
+            "emailAddress": "{{Activity.Field(EmailAddress)}}", 
             "subjectLine": "{{Activity.Field(SubjectLine)}}",
-
-            # NEW: Embedded Contact Fields (Corrected with your info)
+            "emailSendType": "{{Activity.Field(EmailSendType)}}",
             "contact_country": "{{Activity.Contact.Field(C_Country)}}",
             "contact_hp_role": "{{Activity.Contact.Field(C_HP_Role1)}}",
             "contact_hp_partner_id": "{{Activity.Contact.Field(C_HP_PartnerID1)}}",
             "contact_partner_name": "{{Activity.Contact.Field(C_Partner_Name1)}}",
             "contact_market": "{{Activity.Contact.Field(C_Market1)}}"
         }
-        # --- END OF MODIFIED SECTION ---
-
 
         export_payload = {
             "name": f"Bulk_EmailSend_with_Contacts_{start_date[:10]}",
@@ -105,7 +96,7 @@ def fetch_email_sends_bulk(start_date, end_date):
 
         all_items = []
         offset = 0
-        limit = 5000 # Increase limit for bulk
+        limit = 5000 
 
         while True:
             paged_url = f"{base_data_url}?offset={offset}&limit={limit}"
@@ -119,7 +110,7 @@ def fetch_email_sends_bulk(start_date, end_date):
                 items = data.get("items", [])
                 all_items.extend(items)
 
-                if not data.get("hasMore"): # Use 'hasMore' for bulk API
+                if not data.get("hasMore"): 
                     break  # Last page
 
                 offset += limit
@@ -127,8 +118,6 @@ def fetch_email_sends_bulk(start_date, end_date):
             except json.JSONDecodeError as json_err:
                 logging.error("JSON parse error at offset %d: %s", offset, json_err)
                 break
-
-        # Optional: Save full debug
         if DEBUG_MODE:
             os.makedirs("debug_email_sends", exist_ok=True)
             filename = f"debug_email_sends/email_sends_{start_date[:10]}.json"

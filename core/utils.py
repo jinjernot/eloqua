@@ -15,7 +15,7 @@ def sanitize_field(value):
     if isinstance(value, str):
         return value.replace('\n', ' ').replace('\r', ' ').strip()
     if isinstance(value, float):
-        return int(value)  # remove decimal by converting to int
+        return int(value)
     return value
 
 def save_csv(data, filename):

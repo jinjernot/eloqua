@@ -4,8 +4,6 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core.utils import save_json
-# We no longer need batch_fetch_contacts_bulk
-# from core.bulk.bulk_contacts import batch_fetch_contacts_bulk 
 from core.bulk.bulk_email_send import fetch_email_sends_bulk
 from core.rest.fetch_data import fetch_data
 
@@ -37,13 +35,10 @@ def fetch_and_save_data(target_date=None):
 
     results = {}
     print(f"[PERF_DEBUG] Starting ThreadPoolExecutor for all 7 data fetches.")
-    # Using ThreadPoolExecutor to run independent API fetches in parallel
     with ThreadPoolExecutor(max_workers=8) as executor:
         future_to_key = {
-            # This call now fetches sends AND contact data
             executor.submit(fetch_email_sends_bulk, start_str, end_str): "email_sends",
             
-            # These are your other 6 required calls
             executor.submit(fetch_data, BOUNCEBACK_OData_ENDPOINT, "bouncebacks_odata.json", extra_params={"$filter": f"bounceBackDateHour ge {start_str} and bounceBackDateHour lt {end_str_bounceback}"}): "bouncebacks",
             executor.submit(fetch_data, CLICKTHROUGH_ENDPOINT, "email_clickthrough.json", extra_params={"$filter": f"clickDateHour ge {start_str} and clickDateHour lt {end_str_engagement}"}): "email_clickthroughs",
             executor.submit(fetch_data, EMAIL_OPEN_ENDPOINT, "email_open.json", extra_params={"$filter": f"openDateHour ge {start_str} and openDateHour lt {end_str_engagement}"}): "email_opens",
@@ -64,24 +59,16 @@ def fetch_and_save_data(target_date=None):
     
     print(f"[PERF_DEBUG] ThreadPoolExecutor finished.")
 
-    # --- START OF MODIFIED SECTION ---
-    
     email_sends = results.get("email_sends", [])
     save_json(email_sends, os.path.join(DATA_DIR, "email_sends.json"))
-    # This log now represents sends + contact data
     print(f"[INFO] Fetched {len(email_sends)} email sends (with contact data included).")
-
-    # ALL CONTACT AGGREGATION AND FETCHING IS REMOVED
     print(f"[PERF_DEBUG] Skipping separate contact fetch, data was included in email_sends export.")
-
-    # --- END OF MODIFIED SECTION ---
 
     bouncebacks_raw_odata = results.get("bouncebacks", {})
     bouncebacks = bouncebacks_raw_odata.get("value", [])
     save_json(bouncebacks, os.path.join(DATA_DIR, "bouncebacks.json"))
     print(f"[INFO] Fetched {len(bouncebacks)} bouncebacks from OData.")
 
-    # Save other results
     email_clickthrough = results.get("email_clickthroughs", {})
     save_json(email_clickthrough, os.path.join(DATA_DIR, "email_clickthrough.json"))
     print(f"[INFO] Fetched {len(email_clickthrough.get('value', []))} email clickthroughs.")
@@ -103,10 +90,8 @@ def fetch_and_save_data(target_date=None):
     print(f"[INFO] Fetched {len(email_asset_data.get('value', []))} records.")
 
     print("[PERF_DEBUG] Returning all data from fetch_and_save_data.")
-    # Modified return to remove enriched_contacts
     return {
         "email_sends": email_sends,
-        # "enriched_contacts" is no longer needed
         "bouncebacks": bouncebacks,
         "email_clickthroughs": email_clickthrough,
         "email_opens": email_opens,
