@@ -223,8 +223,7 @@ def generate_daily_report(target_date):
         "contact_hp_role": "HP Role",
         "contact_hp_partner_id": "HP Partner Id",
         "contact_partner_name": "Partner Name",
-        "contact_market": "Market",
-        "emailSendType": "Email Send Type"
+        "contact_market": "Market"
     }
     
     df_report = df_sends.rename(columns=final_column_map)

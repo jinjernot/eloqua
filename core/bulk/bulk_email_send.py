@@ -45,7 +45,6 @@ def fetch_email_sends_bulk(start_date, end_date):
             "contactId": "{{Activity.Contact.Id}}",
             "emailAddress": "{{Activity.Field(EmailAddress)}}", 
             "subjectLine": "{{Activity.Field(SubjectLine)}}",
-            "emailSendType": "{{Activity.Field(EmailSendType)}}",
             "contact_country": "{{Activity.Contact.Field(C_Country)}}",
             "contact_hp_role": "{{Activity.Contact.Field(C_HP_Role1)}}",
             "contact_hp_partner_id": "{{Activity.Contact.Field(C_HP_PartnerID1)}}",
