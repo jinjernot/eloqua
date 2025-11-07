@@ -4,7 +4,6 @@ from auth import get_valid_access_token
 from config import *
 from core.utils import save_json
 
-
 DATA_DIR = "data"
 
 def fetch_data(endpoint, filename, extra_params=None):
@@ -29,8 +28,8 @@ def fetch_data(endpoint, filename, extra_params=None):
         data = response.json()
         full_data["value"].extend(data.get("value", []))
         
-        url = data.get("@odata.nextLink")  # Follow pagination if exists
-        params = None  # After first request, nextLink already contains params
+        url = data.get("@odata.nextLink")
+        params = None
 
     filepath = os.path.join(DATA_DIR, filename)
     save_json(full_data, filepath)
