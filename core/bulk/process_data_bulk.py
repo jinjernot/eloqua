@@ -4,9 +4,10 @@ from dateutil import parser
 import logging
 import pandas as pd
 import csv
+import os # <-- ADDED THIS IMPORT
 from core.bulk.fetch_data_bulk import fetch_and_save_data
-# --- 1. IMPORT THE CONTACT FETCHER ---
-from core.bulk.bulk_contacts import batch_fetch_contacts_bulk
+# --- NEW HTML FETCHER IMPORT ---
+from core.rest.fetch_email_content import fetch_email_html 
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +26,13 @@ def fetch_data_with_retries(fetch_function, max_retries=3):
 
 def sanitize_dataframe_for_csv(df):
     """
-    Applies sanitization rules (like removing newlines) to string columns.
+    Applies sanitization rules directly to a pandas DataFrame before saving.
     """
     for col in df.columns:
         if pd.api.types.is_string_dtype(df[col]):
-            # Explicitly cast to string to handle mixed types before .str
             df[col] = df[col].astype(str).str.replace('\n', ' ', regex=False).str.replace('\r', ' ', regex=False).str.strip()
+        elif pd.api.types.is_float_dtype(df[col]):
+            df[col] = df[col].fillna(0).astype(int)
     return df
 
 def generate_daily_report(target_date):
@@ -58,7 +60,7 @@ def generate_daily_report(target_date):
 
     processing_start_time = time.time()
 
-    # 1. Create helper maps (these are small and fast)
+    # 1. Create helper maps
     pd_step_start = time.time()
     email_group_map = {int(item["emailID"]): item.get("emailGroup", "") for item in email_asset_data if item.get("emailID")}
     campaign_map = {c.get("eloquaCampaignId"): c for c in campaign_analysis if c.get("eloquaCampaignId")}
@@ -69,43 +71,36 @@ def generate_daily_report(target_date):
     pd_step_start = time.time()
     
     if not email_sends:
-        logger.warning("No email sends found for this day. Report will be activity-based.")
-        df_sends = pd.DataFrame() # Create empty DF if no sends
-    else:
-        unique_sends_dict = {}
-        for s in email_sends:
-            key = (
-                str(s.get("assetId")), 
-                str(s.get("contactId")),
-                str(s.get("emailSendType"))
-            )
-            unique_sends_dict[key] = s
+        logger.warning("No email sends found. Aborting report.")
+        return None
 
-        df_sends = pd.DataFrame(list(unique_sends_dict.values()))
-        
-        # Filter sends by target date *early*
-        df_sends["activityDateParsed"] = pd.to_datetime(df_sends["activityDate"], errors='coerce')
-        df_sends = df_sends.dropna(subset=["activityDateParsed"]) # Drop rows that couldn't be parsed
-        df_sends = df_sends[df_sends["activityDateParsed"].dt.date == target_date_obj].copy()
-        if df_sends.empty:
-            logger.warning("No email sends found for target date %s.", target_date)
+    unique_sends_dict = {}
+    for s in email_sends:
+        key = (
+            str(s.get("assetId")), 
+            str(s.get("contactId")),
+            str(s.get("emailSendType"))
+        )
+        unique_sends_dict[key] = s
+
+    df_sends = pd.DataFrame(list(unique_sends_dict.values()))
     
-    if not df_sends.empty:
-        # Clean up key fields
-        df_sends["contactId_str"] = df_sends["contactId"].astype(str)
-        df_sends["assetId_str"] = df_sends["assetId"].astype(str)
-        df_sends["assetId_int"] = pd.to_numeric(df_sends["assetId"], errors='coerce').fillna(0).astype(int)
-    else:
-        # Define columns to ensure merge works later
-        df_sends = pd.DataFrame(columns=["contactId_str", "assetId_str", "assetId_int", "activityDateParsed", "activityDate",
-                                         "assetName", "subjectLine", "campaignId", "emailAddress", "contact_country",
-                                         "contact_hp_role", "contact_hp_partner_id", "contact_partner_name", "contact_market"])
+    # Filter sends by target date
+    df_sends["activityDateParsed"] = pd.to_datetime(df_sends["activityDate"], errors='coerce')
+    df_sends = df_sends.dropna(subset=["activityDateParsed"]) # Drop rows that couldn't be parsed
+    df_sends = df_sends[df_sends["activityDateParsed"].dt.date == target_date_obj].copy()
+    if df_sends.empty:
+        logger.warning("No email sends found for target date %s. Aborting.", target_date)
+        return None
+    
+    # Clean up key fields
+    df_sends["contactId_str"] = df_sends["contactId"].astype(str)
+    df_sends["assetId_str"] = df_sends["assetId"].astype(str)
+    df_sends["assetId_int"] = pd.to_numeric(df_sends["assetId"], errors='coerce').fillna(0).astype(int)
+    print(f"[PERF_DEBUG] Step 2: SENDS DataFrame created and filtered ({len(df_sends)} rows) in {time.time() - pd_step_start:.2f}s.")
 
-    print(f"[PERF_DEBUG] Step 2: SENDS DataFrame created ({len(df_sends)} rows) in {time.time() - pd_step_start:.2f}s.")
-
-    # 3. Load and Aggregate BOUNCEBACKS
+    # 3. Load bouncebacks
     pd_step_start = time.time()
-    df_bb_counts = None
     if bouncebacks:
         df_bb = pd.DataFrame(bouncebacks)
         df_bb["cid_str"] = (df_bb.get("contactID", df_bb.get("ContactId"))).astype(str)
@@ -117,16 +112,17 @@ def generate_daily_report(target_date):
         
         bb_key = ["asset_id_str", "cid_str"]
         df_bb_counts = df_bb.groupby(bb_key)[['hard', 'soft', 'total_bb']].sum().reset_index()
-        # RENAME KEYS for outer merge
-        df_bb_counts = df_bb_counts.rename(columns={'asset_id_str': 'assetId_str', 'cid_str': 'contactId_str'})
-        print(f"[PERF_DEBUG] Step 3: BOUNCEBACKS DataFrame created in {time.time() - pd_step_start:.2f}s.")
+        
+        df_sends = df_sends.merge(df_bb_counts, left_on=["assetId_str", "contactId_str"], right_on=bb_key, how="left")
+        print(f"[PERF_DEBUG] Step 3: BOUNCEBACKS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
     else:
+        df_sends["hard"] = 0
+        df_sends["soft"] = 0
+        df_sends["total_bb"] = 0
         print("[PERF_DEBUG] Step 3: Skipped BOUNCEBACKS (no data).")
 
-
-    # 4. Load and Aggregate CLICKS
+    # 4. Load Clicks
     pd_step_start = time.time()
-    df_click_counts = None
     if email_clickthroughs:
         df_clicks = pd.DataFrame(email_clickthroughs)
         df_clicks["cid_str"] = df_clicks["contactID"].astype(str)
@@ -134,15 +130,15 @@ def generate_daily_report(target_date):
         
         click_key = ["asset_id_str", "cid_str"]
         df_click_counts = df_clicks.groupby(click_key).size().to_frame("total_clicks").reset_index()
-        # RENAME KEYS for outer merge
-        df_click_counts = df_click_counts.rename(columns={'asset_id_str': 'assetId_str', 'cid_str': 'contactId_str'})
-        print(f"[PERF_DEBUG] Step 4: CLICKS DataFrame created in {time.time() - pd_step_start:.2f}s.")
+        
+        df_sends = df_sends.merge(df_click_counts, left_on=["assetId_str", "contactId_str"], right_on=click_key, how="left")
+        print(f"[PERF_DEBUG] Step 4: CLICKS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
     else:
+        df_sends["total_clicks"] = 0
         print("[PERF_DEBUG] Step 4: Skipped CLICKS (no data).")
 
-    # 5. Load and Aggregate OPENS
+    # 5. Load Open
     pd_step_start = time.time()
-    df_open_counts = None
     if email_opens:
         df_opens = pd.DataFrame(email_opens)
         df_opens["cid_str"] = df_opens["contactID"].astype(str)
@@ -150,97 +146,51 @@ def generate_daily_report(target_date):
         
         open_key = ["asset_id_str", "cid_str"]
         df_open_counts = df_opens.groupby(open_key).size().to_frame("total_opens").reset_index()
-        # RENAME KEYS for outer merge
-        df_open_counts = df_open_counts.rename(columns={'asset_id_str': 'assetId_str', 'cid_str': 'contactId_str'})
-        print(f"[PERF_DEBUG] Step 5: OPENS DataFrame created in {time.time() - pd_step_start:.2f}s.")
+        
+        df_sends = df_sends.merge(df_open_counts, left_on=["assetId_str", "contactId_str"], right_on=open_key, how="left")
+        print(f"[PERF_DEBUG] Step 5: OPENS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
     else:
+        df_sends["total_opens"] = 0
         print("[PERF_DEBUG] Step 5: Skipped OPENS (no data).")
 
-
-    # 5a. Perform OUTER Merges
+    # Fill NaNs from merges with 0
     pd_step_start = time.time()
-    
-    # Start with df_sends as the "master" for enrichment data
-    df_report = df_sends.copy()
-    merge_keys = ["assetId_str", "contactId_str"]
-
-    if df_bb_counts is not None:
-        df_report = pd.merge(df_report, df_bb_counts, on=merge_keys, how="outer")
-    
-    if df_click_counts is not None:
-        df_report = pd.merge(df_report, df_click_counts, on=merge_keys, how="outer")
-
-    if df_open_counts is not None:
-        df_report = pd.merge(df_report, df_open_counts, on=merge_keys, how="outer")
-    
-    df_sends = df_report 
-    print(f"[PERF_DEBUG] Step 5a: All outer merges complete ({len(df_sends)} rows) in {time.time() - pd_step_start:.2f}s.")
-    
-    # 5b. Fill NaNs from merges with 0 (but NOT for total_bb)
-    pd_step_start = time.time()
-    
-    # Clicks, Opens, and hard/soft bounces can be filled with 0
-    fill_cols = ['total_clicks', 'total_opens', 'hard', 'soft']
+    fill_cols = ['hard', 'soft', 'total_bb', 'total_clicks', 'total_opens']
     for col in fill_cols:
         if col in df_sends.columns:
             df_sends[col] = df_sends[col].fillna(0).astype(int)
+    print(f"[PERF_DEBUG] Step 5b: NaNs filled in {time.time() - pd_step_start:.2f}s.")
     
-    if 'total_bb' not in df_sends.columns and 'hard' in df_sends.columns:
-        df_sends['total_bb'] = df_sends['hard'] + df_sends['soft']
-    elif 'total_bb' not in df_sends.columns:
-         df_sends['total_bb'] = pd.NA # Use pd.NA for "unknown"
 
-    print(f"[PERF_DEBUG] Step 5b: NaNs filled (leaving total_bb) in {time.time() - pd_step_start:.2f}s.")
-    
-    # --- 6. NEW ENRICHMENT STEP ---
-    pd_step_start = time.time()
-    
-    # 6a. Build enrichment maps from the 'send' data we already have
-    # (This fills in asset data for activities that share an assetId with a send)
-    asset_name_map = df_sends.dropna(subset=['assetName']).set_index('assetId_str')['assetName'].to_dict()
-    subject_line_map = df_sends.dropna(subset=['subjectLine']).set_index('assetId_str')['subjectLine'].to_dict()
+    # 6. Load and Merge Data
+    print(f"[PERF_DEBUG] Step 6: Skipped CONTACTS merge (data already included in sends).")
 
-    df_sends['assetName'] = df_sends['assetName'].fillna(df_sends['assetId_str'].map(asset_name_map))
-    df_sends['subjectLine'] = df_sends['subjectLine'].fillna(df_sends['assetId_str'].map(subject_line_map))
     
-    # 6b. Identify and fetch missing *contact* data
-    missing_contact_mask = pd.isna(df_sends['emailAddress'])
-    contact_ids_to_fetch = df_sends.loc[missing_contact_mask, 'contactId_str'].dropna().unique()
-    
-    if len(contact_ids_to_fetch) > 0:
-        print(f"[PERF_DEBUG] Found {len(contact_ids_to_fetch)} contacts from activities to enrich...")
-        # Assuming batch_fetch_contacts_bulk returns a list of dicts
-        # and that CONTACT_FIELDS in config.py includes these fields
-        new_contact_data = batch_fetch_contacts_bulk(list(contact_ids_to_fetch))
+    # --- NEW STEP: Fetch Email HTML (MERGED IN) ---
+    html_fetch_start = time.time()
+    if not df_sends.empty:
+        # Get all unique, valid email asset IDs
+        unique_email_ids = df_sends['assetId_str'].dropna().unique()
         
-        # Build maps for each field
-        email_map = {}
-        country_map = {}
-        role_map = {}
-        partner_id_map = {}
-        partner_name_map = {}
-        market_map = {}
-
-        for c in new_contact_data:
-            cid_str = str(c.get('id'))
-            email_map[cid_str] = c.get('emailAddress')
-            country_map[cid_str] = c.get('C_Country')
-            role_map[cid_str] = c.get('C_HP_Role1')
-            partner_id_map[cid_str] = c.get('C_HP_PartnerID1')
-            partner_name_map[cid_str] = c.get('C_Partner_Name1')
-            market_map[cid_str] = c.get('C_Market1')
-            
-        # 6c. Fill in missing contact data
-        df_sends['emailAddress'] = df_sends['emailAddress'].fillna(df_sends['contactId_str'].map(email_map))
-        df_sends['contact_country'] = df_sends['contact_country'].fillna(df_sends['contactId_str'].map(country_map))
-        df_sends['contact_hp_role'] = df_sends['contact_hp_role'].fillna(df_sends['contactId_str'].map(role_map))
-        df_sends['contact_hp_partner_id'] = df_sends['contact_hp_partner_id'].fillna(df_sends['contactId_str'].map(partner_id_map))
-        df_sends['contact_partner_name'] = df_sends['contact_partner_name'].fillna(df_sends['contactId_str'].map(partner_name_map))
-        df_sends['contact_market'] = df_sends['contact_market'].fillna(df_sends['contactId_str'].map(market_map))
+        logger.info(f"Found {len(unique_email_ids)} unique email assets to fetch HTML for.")
         
-        print(f"[PERF_DEBUG] Enrichment complete in {time.time() - pd_step_start:.2f}s.")
+        fetched_count = 0
+        # You could use a ThreadPoolExecutor here if you have many, but be wary of API rate limits
+        for email_id in unique_email_ids:
+            # Ensure it's a valid ID and not 'nan' or empty
+            if email_id and pd.notna(email_id) and str(email_id).strip():
+                try:
+                    # Use the "email_downloads" folder as requested
+                    save_directory = os.path.join("data", "email_downloads", target_date)
+                    fetch_email_html(str(email_id), save_dir=save_directory)
+                    fetched_count += 1
+                except Exception as e:
+                    logger.error(f"Error fetching HTML for asset {email_id}: {e}")
+        
+        logger.info(f"Fetched HTML for {fetched_count} emails in {time.time() - html_fetch_start:.2f}s.")
     else:
-        print("[PERF_DEBUG] Step 6: No missing contact data to enrich.")
+        logger.info("Skipping HTML fetch as there were no sends.")
+    # --- END NEW STEP ---
 
 
     # 7. Apply Final Logic and Mappings
@@ -256,42 +206,23 @@ def generate_daily_report(target_date):
     
     df_sends["Last Activated by User"] = df_sends["campaignId"].apply(get_user)
     
+    # df_sends = df_sends[df_sends["Last Activated by User"] != ""].copy()
     print(f"[PERF_DEBUG] Skipping user filter, keeping all {len(df_sends)} rows.")
         
-    # Add .copy() here to prevent SettingWithCopyWarning
-    df_sends = df_sends[~df_sends["emailAddress"].str.lower().str.contains("@hp.com", na=False)].copy()
+    df_sends = df_sends[~df_sends["emailAddress"].str.lower().str.contains("@hp.com", na=False)]
     print(f"[PERF_DEBUG] Filtered @hp.com emails, {len(df_sends)} rows remaining.")
 
-    if 'assetId_int' not in df_sends.columns and 'assetId_str' in df_sends.columns:
-         df_sends["assetId_int"] = pd.to_numeric(df_sends["assetId_str"], errors='coerce').fillna(0).astype(int)
-    elif 'assetId_int' in df_sends.columns:
-         df_sends["assetId_int"] = df_sends["assetId_int"].fillna(0).astype(int)
-
-    df_sends["Email Group"] = df_sends["assetId_int"].map(email_group_map) # .fillna("") handled later
-
-    def calc_delivered(total_bb):
-        if pd.isna(total_bb):
-            return pd.NA
-        return 1 if total_bb == 0 else 0
-
-    df_sends["Total Delivered"] = df_sends["total_bb"].apply(calc_delivered).astype('Int64')
-
-    df_sends["Total Sends"] = (~df_sends["activityDateParsed"].isna()).astype(int)
-    
+    df_sends["Email Group"] = df_sends["assetId_int"].map(email_group_map).fillna("")
+    df_sends["Total Delivered"] = (df_sends["total_bb"] == 0).astype(int)
+    df_sends["Total Sends"] = 1
     df_sends["Unique Opens"] = (df_sends["total_opens"] > 0).astype(int)
     df_sends["Unique Clicks"] = (df_sends["total_clicks"] > 0).astype(int)
-    
-    df_sends['hard'] = df_sends['hard'].fillna(0)
-    df_sends['soft'] = df_sends['soft'].fillna(0)
-    
     df_sends["Hard Bounceback Rate"] = df_sends["hard"] * 100
     df_sends["Soft Bounceback Rate"] = df_sends["soft"] * 100
-    
-    df_sends["Bounceback Rate"] = (df_sends["total_bb"].fillna(0) > 0).astype(int) * 100 # Show 100 or 0
-    df_sends["Delivered Rate"] = df_sends["Total Delivered"].fillna(0).astype(int) * 100 # fillna(0) for calc
-    
+    df_sends["Bounceback Rate"] = df_sends["total_bb"] * 100
+    df_sends["Delivered Rate"] = df_sends["Total Delivered"] * 100
     df_sends["Unique Open Rate"] = df_sends["Unique Opens"] * 100
-    df_sends["Clickthrough Rate"] = df_sends["total_clicks"] * 100 
+    df_sends["Clickthrough Rate"] = df_sends["total_clicks"] * 100 # This was original logic
     df_sends["Unique Clickthrough Rate"] = df_sends["Unique Clicks"] * 100
     print(f"[PERF_DEBUG] Step 7: Final logic and calculations applied in {time.time() - pd_step_start:.2f}s.")
 
@@ -322,7 +253,8 @@ def generate_daily_report(target_date):
         "contact_hp_role": "HP Role",
         "contact_hp_partner_id": "HP Partner Id",
         "contact_partner_name": "Partner Name",
-        "contact_market": "Market"
+        "contact_market": "Market",
+        "emailSendType": "Email Send Type"
     }
     
     df_report = df_sends.rename(columns=final_column_map)
@@ -330,13 +262,12 @@ def generate_daily_report(target_date):
     final_columns_ordered = []
     for col_name in final_column_map.values():
         if col_name not in df_report.columns:
-            df_report[col_name] = pd.NA # Use pd.NA
+            df_report[col_name] = None
         final_columns_ordered.append(col_name)
             
     df_report = df_report[final_columns_ordered]
     
-    df_report["Email Send Date"] = pd.to_datetime(df_report["Email Send Date"]).dt.strftime("%Y-%m-%d %I:%M:%S %p")
-    
+    df_report["Email Send Date"] = df_report["Email Send Date"].dt.strftime("%Y-%m-%d %I:%M:%S %p")
     df_report["Email Address"] = df_report["Email Address"].str.lower()
     print(f"[PERF_DEBUG] Step 8: Final column renaming and formatting in {time.time() - pd_step_start:.2f}s.")
     
@@ -346,37 +277,13 @@ def generate_daily_report(target_date):
     output_file = f"data/{target_date}.csv"
     
     pd_step_start = time.time()
-    
-    # 9. SAVING LOGIC
-    
-    # 9a. Sanitize strings (remove newlines, etc.)
     df_report = sanitize_dataframe_for_csv(df_report)
-    
-    # 9b. Fill NaNs for numeric counts that should be 0, not blank
-    fill_zero_cols = [
-        'Total Hard Bouncebacks', 'Total Soft Bouncebacks', 
-        'Total Bouncebacks', 'Unique Opens', 'Unique Clicks', 
-        'Total Sends'
-    ]
-    for col in fill_zero_cols:
-        if col in df_report.columns:
-            df_report[col] = df_report[col].fillna(0).astype(int)
-
-    # 9c. Replace "NaT" from blank dates
-    df_report["Email Send Date"] = df_report["Email Send Date"].replace("NaT", "")
-    
-    # 9d. fillna("") on non-numeric columns
-    for col in df_report.select_dtypes(include=['object', 'string']).columns:
-        df_report[col] = df_report[col].fillna("")
-
-    # 9e. Save to CSV, using na_rep=""
     df_report.to_csv(
         output_file, 
         sep="\t",
         index=False, 
         encoding="utf-8-sig",
-        quoting=csv.QUOTE_MINIMAL,
-        na_rep="" # This handles pd.NA in Int64 columns
+        quoting=csv.QUOTE_MINIMAL
     )
     print(f"[PERF_DEBUG] Step 9: Sanitized and saved final CSV to {output_file} in {time.time() - pd_step_start:.2f}s.")
 
