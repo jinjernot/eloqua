@@ -4,9 +4,9 @@ from dateutil import parser
 import logging
 import pandas as pd
 import csv
-import os # <-- ADDED THIS IMPORT
+import os
 from core.bulk.fetch_data_bulk import fetch_and_save_data
-# --- NEW HTML FETCHER IMPORT ---
+
 from core.rest.fetch_email_content import fetch_email_html 
 
 logger = logging.getLogger(__name__)
@@ -165,8 +165,6 @@ def generate_daily_report(target_date):
     # 6. Load and Merge Data
     print(f"[PERF_DEBUG] Step 6: Skipped CONTACTS merge (data already included in sends).")
 
-    
-    # --- NEW STEP: Fetch Email HTML (MERGED IN) ---
     html_fetch_start = time.time()
     if not df_sends.empty:
         # Get all unique, valid email asset IDs

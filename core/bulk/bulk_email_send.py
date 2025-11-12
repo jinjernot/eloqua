@@ -37,7 +37,6 @@ def fetch_email_sends_bulk(start_date, end_date):
         date_filter = f"'{{{{Activity.Type}}}}' = 'EmailSend' AND '{{{{Activity.CreatedAt}}}}' >= '{start_date}' AND '{{{{Activity.CreatedAt}}}}' < '{end_date}'"
 
         COMBINED_EMAIL_SEND_FIELDS = {
-            # Standard Activity Fields
             "activityDate": "{{Activity.CreatedAt}}",
             "assetId": "{{Activity.Asset.Id}}",
             "assetName": "{{Activity.Asset.Name}}",
@@ -110,7 +109,7 @@ def fetch_email_sends_bulk(start_date, end_date):
                 all_items.extend(items)
 
                 if not data.get("hasMore"): 
-                    break  # Last page
+                    break
 
                 offset += limit
 

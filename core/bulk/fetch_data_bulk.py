@@ -7,6 +7,15 @@ from core.utils import save_json
 from core.bulk.bulk_email_send import fetch_email_sends_bulk
 from core.rest.fetch_data import fetch_data
 
+from config import (
+    BOUNCEBACK_OData_ENDPOINT,
+    CLICKTHROUGH_ENDPOINT,
+    EMAIL_OPEN_ENDPOINT,
+    CAMPAIGN_ANALYSIS_ENDPOINT,
+    CAMPAIGN_USERS_ENDPOINT,
+    EMAIL_ASSET_ENDPOINT,
+)
+
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -24,14 +33,6 @@ def fetch_and_save_data(target_date=None):
 
     engagement_end_date = start + timedelta(days=30)
     end_str_engagement = engagement_end_date.strftime("%Y-%m-%dT00:00:00Z")
-
-
-    BOUNCEBACK_OData_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/ActivityDetails/1/EmailBounceback"
-    CLICKTHROUGH_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/ActivityDetails/1/EmailClickthrough"
-    EMAIL_OPEN_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/ActivityDetails/1/EmailOpen"
-    CAMPAIGN_ANALYSIS_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/CampaignAnalysis/1/Campaign"
-    CAMPAIGN_USERS_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/CampaignAnalysis/1/User"
-    EMAIL_ASSET_ENDPOINT = "https://secure.p06.eloqua.com/API/OData/FormSubmission/1/EmailAsset"
 
     results = {}
     print(f"[PERF_DEBUG] Starting ThreadPoolExecutor for all 7 data fetches.")
