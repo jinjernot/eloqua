@@ -53,7 +53,7 @@ def fetch_email_sends_bulk(start_date, end_date):
 
         export_payload = {
             "name": f"Bulk_EmailSend_with_Contacts_{start_date[:10]}",
-            "fields": COMBINED_EMAIL_SEND_FIELDS, # Use the new combined fields
+            "fields": COMBINED_EMAIL_SEND_FIELDS,
             "filter": date_filter
         }
 
