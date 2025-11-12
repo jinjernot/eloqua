@@ -63,9 +63,26 @@ def generate_daily_report(target_date):
     # 1. Create helper maps
     pd_step_start = time.time()
     email_group_map = {int(item["emailID"]): item.get("emailGroup", "") for item in email_asset_data if item.get("emailID")}
+    email_name_map = {int(item["emailID"]): item.get("emailName", "") for item in email_asset_data if item.get("emailID")}
+    email_subject_map = {int(item["emailID"]): item.get("subject", "") for item in email_asset_data if item.get("emailID")}
     campaign_map = {c.get("eloquaCampaignId"): c for c in campaign_analysis if c.get("eloquaCampaignId")}
     user_map = {u.get("userID"): u.get("userName", "") for u in campaign_users if u.get("userID")}
-    print(f"[PERF_DEBUG] Step 1: Helper maps created in {time.time() - pd_step_start:.2f}s.")
+    
+    # Create contact lookup from email_sends for forwarded emails
+    contact_lookup = {}
+    for send in email_sends:
+        cid = str(send.get("contactId", ""))
+        if cid and cid not in contact_lookup:
+            contact_lookup[cid] = {
+                "emailAddress": send.get("emailAddress", ""),
+                "contact_country": send.get("contact_country", ""),
+                "contact_hp_role": send.get("contact_hp_role", ""),
+                "contact_hp_partner_id": send.get("contact_hp_partner_id", ""),
+                "contact_partner_name": send.get("contact_partner_name", ""),
+                "contact_market": send.get("contact_market", "")
+            }
+    
+    print(f"[PERF_DEBUG] Step 1: Helper maps created ({len(contact_lookup)} contacts) in {time.time() - pd_step_start:.2f}s.")
 
     # 2. Load SENDS DataFrame
     pd_step_start = time.time()
@@ -143,6 +160,7 @@ def generate_daily_report(target_date):
         df_opens = pd.DataFrame(email_opens)
         df_opens["cid_str"] = df_opens["contactID"].astype(str)
         df_opens["asset_id_str"] = df_opens["emailID"].astype(str)
+        df_opens["emailAddress"] = df_opens.get("emailAddress", "")
         
         open_key = ["asset_id_str", "cid_str"]
         df_open_counts = df_opens.groupby(open_key).size().to_frame("total_opens").reset_index()
@@ -151,6 +169,7 @@ def generate_daily_report(target_date):
         print(f"[PERF_DEBUG] Step 5: OPENS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
     else:
         df_sends["total_opens"] = 0
+        df_opens = pd.DataFrame()
         print("[PERF_DEBUG] Step 5: Skipped OPENS (no data).")
 
     # Fill NaNs from merges with 0
@@ -161,33 +180,148 @@ def generate_daily_report(target_date):
             df_sends[col] = df_sends[col].fillna(0).astype(int)
     print(f"[PERF_DEBUG] Step 5b: NaNs filled in {time.time() - pd_step_start:.2f}s.")
     
+    # 5c. Identify forwarded emails (opens/clicks without sends) - VECTORIZED APPROACH
+    pd_step_start = time.time()
+    
+    # Combine opens and clicks to find all engagement without sends
+    engagement_list = []
+    
+    # Process opens
+    if not df_opens.empty:
+        df_opens_filtered = df_opens.copy()
+        df_opens_filtered["activityDateParsed"] = pd.to_datetime(df_opens_filtered.get("openDateHour", ""), errors='coerce')
+        df_opens_filtered = df_opens_filtered[df_opens_filtered["activityDateParsed"].notna()]
+        df_opens_filtered = df_opens_filtered[df_opens_filtered["activityDateParsed"].dt.date == target_date_obj]
+        
+        if not df_opens_filtered.empty:
+            # Keep emailAddress if available
+            cols_to_keep = ["asset_id_str", "cid_str", "openDateHour"]
+            if "emailAddress" in df_opens_filtered.columns:
+                cols_to_keep.append("emailAddress")
+            
+            engagement_list.append(df_opens_filtered[cols_to_keep].rename(
+                columns={"openDateHour": "activityDate"}
+            ))
+    
+    # Process clicks
+    if email_clickthroughs and not df_clicks.empty:
+        df_clicks_filtered = df_clicks.copy()
+        df_clicks_filtered["activityDateParsed"] = pd.to_datetime(df_clicks_filtered.get("clickDateHour", ""), errors='coerce')
+        df_clicks_filtered = df_clicks_filtered[df_clicks_filtered["activityDateParsed"].notna()]
+        df_clicks_filtered = df_clicks_filtered[df_clicks_filtered["activityDateParsed"].dt.date == target_date_obj]
+        
+        if not df_clicks_filtered.empty:
+            # Keep emailAddress if available
+            cols_to_keep = ["asset_id_str", "cid_str", "clickDateHour"]
+            if "emailAddress" in df_clicks_filtered.columns:
+                cols_to_keep.append("emailAddress")
+                
+            engagement_list.append(df_clicks_filtered[cols_to_keep].rename(
+                columns={"clickDateHour": "activityDate"}
+            ))
+    
+    if engagement_list:
+        # Combine all engagement
+        df_engagement = pd.concat(engagement_list, ignore_index=True)
+        df_engagement = df_engagement.drop_duplicates(subset=["asset_id_str", "cid_str"])
+        
+        # Create merge key in both dataframes
+        df_sends["merge_key"] = df_sends["assetId_str"] + "_" + df_sends["contactId_str"]
+        df_engagement["merge_key"] = df_engagement["asset_id_str"] + "_" + df_engagement["cid_str"]
+        
+        # Find engagement without sends using anti-join
+        df_forwarded = df_engagement[~df_engagement["merge_key"].isin(df_sends["merge_key"])].copy()
+        
+        # Clean up merge_key column
+        df_sends.drop(columns=["merge_key"], inplace=True)
+        
+        if not df_forwarded.empty:
+            # Build forwarded email records
+            df_forwarded = df_forwarded.rename(columns={"asset_id_str": "assetId_str", "cid_str": "contactId_str"})
+            df_forwarded["assetId"] = df_forwarded["assetId_str"]
+            df_forwarded["contactId"] = df_forwarded["contactId_str"]
+            df_forwarded["assetId_int"] = pd.to_numeric(df_forwarded["assetId"], errors='coerce').fillna(0).astype(int)
+            
+            # Keep activityDate as datetime object for Email Send Date
+            df_forwarded["activityDateParsed"] = pd.to_datetime(df_forwarded["activityDate"], errors='coerce')
+            
+            df_forwarded["emailSendType"] = "Forwarded"
+            df_forwarded["assetName"] = ""
+            df_forwarded["campaignId"] = ""
+            df_forwarded["subjectLine"] = ""
+            
+            # Initialize contact fields
+            df_forwarded["emailAddress"] = ""
+            df_forwarded["contact_country"] = ""
+            df_forwarded["contact_hp_role"] = ""
+            df_forwarded["contact_hp_partner_id"] = ""
+            df_forwarded["contact_partner_name"] = ""
+            df_forwarded["contact_market"] = ""
+            
+            # Add engagement metrics
+            df_forwarded = df_forwarded.merge(df_open_counts, left_on=["assetId_str", "contactId_str"], right_on=open_key, how="left")
+            df_forwarded = df_forwarded.merge(df_click_counts, left_on=["assetId_str", "contactId_str"], right_on=click_key, how="left")
+            
+            # Forwarded emails have no sends or bouncebacks
+            df_forwarded["hard"] = 0
+            df_forwarded["soft"] = 0
+            df_forwarded["total_bb"] = 0
+            df_forwarded["total_opens"] = df_forwarded["total_opens"].fillna(0).astype(int)
+            df_forwarded["total_clicks"] = df_forwarded["total_clicks"].fillna(0).astype(int)
+            
+            # Enrich forwarded emails with asset and contact information using pre-built maps
+            df_forwarded["assetName"] = df_forwarded["assetId_int"].map(email_name_map).fillna("")
+            df_forwarded["subjectLine"] = df_forwarded["assetId_int"].map(email_subject_map).fillna("")
+            
+            # Enrich contact information from contact_lookup dictionary
+            def get_contact_field(contact_id, field):
+                contact = contact_lookup.get(str(contact_id), {})
+                return contact.get(field, "")
+            
+            df_forwarded["emailAddress"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "emailAddress"))
+            df_forwarded["contact_country"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_country"))
+            df_forwarded["contact_hp_role"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_hp_role"))
+            df_forwarded["contact_hp_partner_id"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_hp_partner_id"))
+            df_forwarded["contact_partner_name"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_partner_name"))
+            df_forwarded["contact_market"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_market"))
+            
+            # Append forwarded emails to sends
+            df_sends = pd.concat([df_sends, df_forwarded], ignore_index=True)
+            print(f"[PERF_DEBUG] Step 5c: Added {len(df_forwarded)} forwarded email records in {time.time() - pd_step_start:.2f}s.")
+        else:
+            print(f"[PERF_DEBUG] Step 5c: No forwarded emails found in {time.time() - pd_step_start:.2f}s.")
+    else:
+        print(f"[PERF_DEBUG] Step 5c: No engagement data to check for forwards in {time.time() - pd_step_start:.2f}s.")
+    
 
     # 6. Load and Merge Data
     print(f"[PERF_DEBUG] Step 6: Skipped CONTACTS merge (data already included in sends).")
 
-    html_fetch_start = time.time()
-    if not df_sends.empty:
-        # Get all unique, valid email asset IDs
-        unique_email_ids = df_sends['assetId_str'].dropna().unique()
-        
-        logger.info(f"Found {len(unique_email_ids)} unique email assets to fetch HTML for.")
-        
-        fetched_count = 0
-        # You could use a ThreadPoolExecutor here if you have many, but be wary of API rate limits
-        for email_id in unique_email_ids:
-            # Ensure it's a valid ID and not 'nan' or empty
-            if email_id and pd.notna(email_id) and str(email_id).strip():
-                try:
-                    # Use the "email_downloads" folder as requested
-                    save_directory = os.path.join("data", "email_downloads", target_date)
-                    fetch_email_html(str(email_id), save_dir=save_directory)
-                    fetched_count += 1
-                except Exception as e:
-                    logger.error(f"Error fetching HTML for asset {email_id}: {e}")
-        
-        logger.info(f"Fetched HTML for {fetched_count} emails in {time.time() - html_fetch_start:.2f}s.")
-    else:
-        logger.info("Skipping HTML fetch as there were no sends.")
+    # Temporarily disabled for faster testing
+    logger.info("Skipping HTML email download (disabled for testing).")
+    # html_fetch_start = time.time()
+    # if not df_sends.empty:
+    #     # Get all unique, valid email asset IDs
+    #     unique_email_ids = df_sends['assetId_str'].dropna().unique()
+    #     
+    #     logger.info(f"Found {len(unique_email_ids)} unique email assets to fetch HTML for.")
+    #     
+    #     fetched_count = 0
+    #     # You could use a ThreadPoolExecutor here if you have many, but be wary of API rate limits
+    #     for email_id in unique_email_ids:
+    #         # Ensure it's a valid ID and not 'nan' or empty
+    #         if email_id and pd.notna(email_id) and str(email_id).strip():
+    #             try:
+    #                 # Use the "email_downloads" folder as requested
+    #                 save_directory = os.path.join("data", "email_downloads", target_date)
+    #                 fetch_email_html(str(email_id), save_dir=save_directory)
+    #                 fetched_count += 1
+    #             except Exception as e:
+    #                 logger.error(f"Error fetching HTML for asset {email_id}: {e}")
+    #     
+    #     logger.info(f"Fetched HTML for {fetched_count} emails in {time.time() - html_fetch_start:.2f}s.")
+    # else:
+    #     logger.info("Skipping HTML fetch as there were no sends.")
     # --- END NEW STEP ---
 
 
@@ -202,7 +336,24 @@ def generate_daily_report(target_date):
         except (ValueError, TypeError):
             return ""
     
-    df_sends["Last Activated by User"] = df_sends["campaignId"].apply(get_user)
+    # Create asset-to-user lookup from regular sends for forwarded emails
+    asset_user_map = {}
+    for _, row in df_sends[df_sends["emailSendType"] != "Forwarded"].iterrows():
+        asset_id = str(row.get("assetId_str", ""))
+        campaign_id = row.get("campaignId", "")
+        if asset_id and campaign_id and asset_id not in asset_user_map:
+            user = get_user(campaign_id)
+            if user:
+                asset_user_map[asset_id] = user
+    
+    # Apply user lookup - for regular sends use campaign, for forwarded use asset lookup
+    def get_user_for_row(row):
+        if row["emailSendType"] == "Forwarded":
+            return asset_user_map.get(str(row["assetId_str"]), "")
+        else:
+            return get_user(row["campaignId"])
+    
+    df_sends["Last Activated by User"] = df_sends.apply(get_user_for_row, axis=1)
     
     # df_sends = df_sends[df_sends["Last Activated by User"] != ""].copy()
     print(f"[PERF_DEBUG] Skipping user filter, keeping all {len(df_sends)} rows.")
@@ -211,8 +362,14 @@ def generate_daily_report(target_date):
     print(f"[PERF_DEBUG] Filtered @hp.com emails, {len(df_sends)} rows remaining.")
 
     df_sends["Email Group"] = df_sends["assetId_int"].map(email_group_map).fillna("")
-    df_sends["Total Delivered"] = (df_sends["total_bb"] == 0).astype(int)
-    df_sends["Total Sends"] = 1
+    
+    # For forwarded emails, Total Sends and Total Delivered should be blank/0
+    df_sends["Total Sends"] = df_sends["emailSendType"].apply(lambda x: 0 if x == "Forwarded" else 1)
+    df_sends["Total Delivered"] = df_sends.apply(
+        lambda row: 0 if row["emailSendType"] == "Forwarded" else (1 if row["total_bb"] == 0 else 0), 
+        axis=1
+    )
+    
     df_sends["Unique Opens"] = (df_sends["total_opens"] > 0).astype(int)
     df_sends["Unique Clicks"] = (df_sends["total_clicks"] > 0).astype(int)
     df_sends["Hard Bounceback Rate"] = df_sends["hard"] * 100
@@ -265,6 +422,8 @@ def generate_daily_report(target_date):
             
     df_report = df_report[final_columns_ordered]
     
+    # Convert Email Send Date to datetime if not already, then format
+    df_report["Email Send Date"] = pd.to_datetime(df_report["Email Send Date"], errors='coerce')
     df_report["Email Send Date"] = df_report["Email Send Date"].dt.strftime("%Y-%m-%d %I:%M:%S %p")
     df_report["Email Address"] = df_report["Email Address"].str.lower()
     print(f"[PERF_DEBUG] Step 8: Final column renaming and formatting in {time.time() - pd_step_start:.2f}s.")
