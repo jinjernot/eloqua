@@ -62,9 +62,25 @@ def generate_daily_report(target_date):
 
     # 1. Create helper maps
     pd_step_start = time.time()
+    
+    # Debug: check what fields are available in email_asset_data
+    if email_asset_data and len(email_asset_data) > 0:
+        sample_fields = list(email_asset_data[0].keys())
+        logger.info(f"Email asset data fields: {sample_fields}")
+    
     email_group_map = {int(item["emailID"]): item.get("emailGroup", "") for item in email_asset_data if item.get("emailID")}
     email_name_map = {int(item["emailID"]): item.get("emailName", "") for item in email_asset_data if item.get("emailID")}
-    email_subject_map = {int(item["emailID"]): item.get("subject", "") for item in email_asset_data if item.get("emailID")}
+    
+    # Try multiple possible field names for subject
+    email_subject_map = {}
+    for item in email_asset_data:
+        if item.get("emailID"):
+            email_id = int(item["emailID"])
+            subject = item.get("subject") or item.get("emailSubject") or item.get("subjectLine") or item.get("Subject") or ""
+            email_subject_map[email_id] = subject
+    
+    logger.info(f"Built email_subject_map with {len(email_subject_map)} entries, sample: {list(email_subject_map.items())[:3]}")
+    
     campaign_map = {c.get("eloquaCampaignId"): c for c in campaign_analysis if c.get("eloquaCampaignId")}
     user_map = {u.get("userID"): u.get("userName", "") for u in campaign_users if u.get("userID")}
     
@@ -284,6 +300,11 @@ def generate_daily_report(target_date):
             df_forwarded["contact_hp_partner_id"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_hp_partner_id"))
             df_forwarded["contact_partner_name"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_partner_name"))
             df_forwarded["contact_market"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_market"))
+            
+            # Log how many contacts are missing email addresses
+            missing_count = (df_forwarded["emailAddress"] == "").sum()
+            if missing_count > 0:
+                logger.info(f"{missing_count} forwarded email contacts have no email address (new contacts not in sends)")
             
             # Append forwarded emails to sends
             df_sends = pd.concat([df_sends, df_forwarded], ignore_index=True)
