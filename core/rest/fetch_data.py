@@ -1,12 +1,15 @@
 import os
 import requests
 import time
+import json
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from auth import get_valid_access_token
 from config import *
 from core.utils import save_json
 
 DATA_DIR = "data"
+CONTACT_CACHE_FILE = "data/contact_cache.json"
 
 def fetch_data(endpoint, filename, extra_params=None):
     access_token = get_valid_access_token()
@@ -36,6 +39,45 @@ def fetch_data(endpoint, filename, extra_params=None):
     filepath = os.path.join(DATA_DIR, filename)
     save_json(full_data, filepath)
     return full_data
+
+
+def load_contact_cache():
+    """
+    Load previously fetched contacts from cache file.
+    
+    Returns:
+        Dictionary mapping contact_id (str) to contact data, or empty dict if cache doesn't exist
+    """
+    cache_path = Path(CONTACT_CACHE_FILE)
+    if cache_path.exists():
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                cache = json.load(f)
+                print(f"[CACHE] Loaded {len(cache)} contacts from cache")
+                return cache
+        except Exception as e:
+            print(f"[CACHE] Warning: Could not load contact cache: {e}")
+            return {}
+    else:
+        print(f"[CACHE] No existing cache found, will create new one")
+    return {}
+
+
+def save_contact_cache(cache):
+    """
+    Save contact cache to JSON file.
+    
+    Args:
+        cache: Dictionary mapping contact_id (str) to contact data
+    """
+    cache_path = Path(CONTACT_CACHE_FILE)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        print(f"[CACHE] Saved {len(cache)} contacts to cache")
+    except Exception as e:
+        print(f"[CACHE] Warning: Could not save contact cache: {e}")
 
 
 def fetch_contact_by_id(contact_id):
@@ -106,34 +148,80 @@ def fetch_contact_by_id(contact_id):
         return None
 
 
-def fetch_contacts_batch(contact_ids, max_workers=5):
-    """Fetch multiple contacts in parallel with rate limiting"""
+def fetch_contacts_batch(contact_ids, max_workers=5, use_cache=True):
+    """
+    Fetch multiple contacts in parallel with rate limiting and caching.
+    
+    Args:
+        contact_ids: List of contact IDs to fetch
+        max_workers: Number of parallel workers for API calls
+        use_cache: If True, checks cache before fetching and saves new contacts to cache
+    
+    Returns:
+        Dictionary mapping contact_id (str) to contact data
+    """
     if not contact_ids:
         return {}
     
-    print(f"[INFO] Fetching {len(contact_ids)} contacts from API (this may take a while)...")
     contacts = {}
+    
+    # Load existing cache
+    cache = load_contact_cache() if use_cache else {}
+    
+    # Separate cached vs. needs-fetch contacts
+    contacts_to_fetch = []
+    cache_hits = 0
+    
+    for cid in contact_ids:
+        cid_str = str(cid)
+        if cid_str in cache:
+            contacts[cid_str] = cache[cid_str]
+            cache_hits += 1
+        else:
+            contacts_to_fetch.append(cid)
+    
+    total = len(contact_ids)
+    to_fetch_count = len(contacts_to_fetch)
+    
+    if cache_hits > 0:
+        print(f"[CACHE] {cache_hits}/{total} contacts loaded from cache")
+    
+    if to_fetch_count == 0:
+        print(f"[CACHE] All contacts found in cache, no API calls needed!")
+        return contacts
+    
+    print(f"[API] Fetching {to_fetch_count} new contacts via API (this may take {to_fetch_count * 0.2 / 60:.1f} minutes)...")
     
     def fetch_with_delay(contact_id):
         time.sleep(0.2)  # Rate limiting: 5 requests per second
         result = fetch_contact_by_id(contact_id)
         return contact_id, result
     
+    newly_fetched = {}
+    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(fetch_with_delay, cid): cid for cid in contact_ids}
+        futures = {executor.submit(fetch_with_delay, cid): cid for cid in contacts_to_fetch}
         
         completed = 0
         for future in as_completed(futures):
             completed += 1
             if completed % 100 == 0:
-                print(f"[INFO] Progress: {completed}/{len(contact_ids)} contacts fetched")
+                print(f"[API] Progress: {completed}/{to_fetch_count} contacts fetched")
             
             try:
                 contact_id, contact_data = future.result()
                 if contact_data:
-                    contacts[str(contact_id)] = contact_data
+                    cid_str = str(contact_id)
+                    contacts[cid_str] = contact_data
+                    newly_fetched[cid_str] = contact_data
             except Exception as e:
                 print(f"[ERROR] Failed to fetch contact: {e}")
     
-    print(f"[INFO] Successfully fetched {len(contacts)}/{len(contact_ids)} contacts")
+    print(f"[API] Successfully fetched {len(newly_fetched)}/{to_fetch_count} new contacts")
+    
+    # Update and save cache with newly fetched contacts
+    if use_cache and newly_fetched:
+        cache.update(newly_fetched)
+        save_contact_cache(cache)
+    
     return contacts
