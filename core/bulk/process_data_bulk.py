@@ -259,7 +259,8 @@ def generate_daily_report(target_date):
             df_forwarded["assetId_int"] = pd.to_numeric(df_forwarded["assetId"], errors='coerce').fillna(0).astype(int)
             
             # Keep activityDate as datetime object for Email Send Date
-            df_forwarded["activityDateParsed"] = pd.to_datetime(df_forwarded["activityDate"], errors='coerce')
+            # Convert to datetime and remove timezone info to match format of regular sends
+            df_forwarded["activityDateParsed"] = pd.to_datetime(df_forwarded["activityDate"], errors='coerce', utc=True).dt.tz_localize(None)
             
             df_forwarded["emailSendType"] = "Forwarded"
             df_forwarded["assetName"] = ""
@@ -294,7 +295,18 @@ def generate_daily_report(target_date):
                 contact = contact_lookup.get(str(contact_id), {})
                 return contact.get(field, "")
             
-            df_forwarded["emailAddress"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "emailAddress"))
+            # For emailAddress, keep the one from engagement data if available, otherwise use contact_lookup
+            if "emailAddress" not in df_forwarded.columns:
+                df_forwarded["emailAddress"] = ""
+            
+            df_forwarded["emailAddress_from_lookup"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "emailAddress"))
+            df_forwarded["emailAddress"] = df_forwarded.apply(
+                lambda row: row["emailAddress"] if pd.notna(row["emailAddress"]) and row["emailAddress"] != "" 
+                else row["emailAddress_from_lookup"], 
+                axis=1
+            )
+            df_forwarded.drop(columns=["emailAddress_from_lookup"], inplace=True)
+            
             df_forwarded["contact_country"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_country"))
             df_forwarded["contact_hp_role"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_hp_role"))
             df_forwarded["contact_hp_partner_id"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_hp_partner_id"))
@@ -367,14 +379,25 @@ def generate_daily_report(target_date):
             if user:
                 asset_user_map[asset_id] = user
     
+    logger.info(f"Built asset_user_map with {len(asset_user_map)} entries for forwarded email user lookup")
+    
     # Apply user lookup - for regular sends use campaign, for forwarded use asset lookup
     def get_user_for_row(row):
         if row["emailSendType"] == "Forwarded":
-            return asset_user_map.get(str(row["assetId_str"]), "")
+            asset_id = str(row["assetId_str"])
+            user = asset_user_map.get(asset_id, "")
+            if not user:
+                logger.debug(f"No user found for forwarded email assetId {asset_id}")
+            return user
         else:
             return get_user(row["campaignId"])
     
     df_sends["Last Activated by User"] = df_sends.apply(get_user_for_row, axis=1)
+    
+    # Debug: Check user population for forwarded emails
+    forwarded_mask = df_sends["emailSendType"] == "Forwarded"
+    users_populated = (df_sends[forwarded_mask]["Last Activated by User"] != "").sum()
+    logger.info(f"Last Activated by User populated for {users_populated}/{forwarded_mask.sum()} forwarded emails")
     
     # df_sends = df_sends[df_sends["Last Activated by User"] != ""].copy()
     print(f"[PERF_DEBUG] Skipping user filter, keeping all {len(df_sends)} rows.")
@@ -443,8 +466,7 @@ def generate_daily_report(target_date):
             
     df_report = df_report[final_columns_ordered]
     
-    # Convert Email Send Date to datetime if not already, then format
-    df_report["Email Send Date"] = pd.to_datetime(df_report["Email Send Date"], errors='coerce')
+    # Format Email Send Date - it's already a datetime, just needs formatting
     df_report["Email Send Date"] = df_report["Email Send Date"].dt.strftime("%Y-%m-%d %I:%M:%S %p")
     df_report["Email Address"] = df_report["Email Address"].str.lower()
     print(f"[PERF_DEBUG] Step 8: Final column renaming and formatting in {time.time() - pd_step_start:.2f}s.")
