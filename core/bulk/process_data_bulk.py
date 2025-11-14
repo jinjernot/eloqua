@@ -313,10 +313,50 @@ def generate_daily_report(target_date):
             df_forwarded["contact_partner_name"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_partner_name"))
             df_forwarded["contact_market"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_market"))
             
-            # Log how many contacts are missing email addresses
-            missing_count = (df_forwarded["emailAddress"] == "").sum()
+            # Fetch missing contact data from API for contacts not in lookup
+            missing_contacts = df_forwarded[
+                (df_forwarded["emailAddress"].isna() | (df_forwarded["emailAddress"] == ""))
+            ]["contactId_str"].unique().tolist()
+            
+            if missing_contacts:
+                logger.info(f"{len(missing_contacts)} forwarded contacts have no email address (not in sends)")
+                
+                # Ask user for confirmation before making API calls
+                from core.rest.fetch_data import fetch_contacts_batch
+                logger.info(f"Fetching missing contact data from API for {len(missing_contacts)} contacts...")
+                
+                additional_contacts = fetch_contacts_batch(missing_contacts, max_workers=5)
+                
+                if additional_contacts:
+                    logger.info(f"Retrieved {len(additional_contacts)} additional contacts from API")
+                    
+                    # Merge additional contacts into contact_lookup
+                    for cid, contact_data in additional_contacts.items():
+                        contact_lookup[cid] = {
+                            "emailAddress": contact_data.get("emailAddress", ""),
+                            "contact_country": contact_data.get("country", ""),
+                            "contact_hp_role": contact_data.get("hp_role", ""),
+                            "contact_hp_partner_id": contact_data.get("hp_partner_id", ""),
+                            "contact_partner_name": contact_data.get("partner_name", ""),
+                            "contact_market": contact_data.get("market", "")
+                        }
+                    
+                    # Re-apply contact enrichment for the newly fetched contacts
+                    df_forwarded["emailAddress"] = df_forwarded.apply(
+                        lambda row: row["emailAddress"] if pd.notna(row["emailAddress"]) and row["emailAddress"] != "" 
+                        else get_contact_field(row["contactId_str"], "emailAddress"), 
+                        axis=1
+                    )
+                    df_forwarded["contact_country"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_country"))
+                    df_forwarded["contact_hp_role"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_hp_role"))
+                    df_forwarded["contact_hp_partner_id"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_hp_partner_id"))
+                    df_forwarded["contact_partner_name"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_partner_name"))
+                    df_forwarded["contact_market"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_market"))
+            
+            # Log how many contacts are still missing email addresses after API fetch
+            missing_count = (df_forwarded["emailAddress"] == "").sum() + df_forwarded["emailAddress"].isna().sum()
             if missing_count > 0:
-                logger.info(f"{missing_count} forwarded email contacts have no email address (new contacts not in sends)")
+                logger.info(f"{missing_count} forwarded email contacts still have no email address after API fetch")
             
             # Append forwarded emails to sends
             df_sends = pd.concat([df_sends, df_forwarded], ignore_index=True)
@@ -369,12 +409,22 @@ def generate_daily_report(target_date):
         except (ValueError, TypeError):
             return ""
     
-    # Create asset-to-user lookup from regular sends for forwarded emails
+    # Create asset-to-user lookup for forwarded emails
+    # First, populate from email_asset_data (email creators)
     asset_user_map = {}
+    for asset in email_asset_data:
+        asset_id = str(asset.get("emailID", ""))
+        user_id = asset.get("emailCreatedByUserID")
+        if asset_id and user_id:
+            user = user_map.get(user_id, "")
+            if user:
+                asset_user_map[asset_id] = user
+    
+    # Then, override with campaign user from regular sends if available (more specific)
     for _, row in df_sends[df_sends["emailSendType"] != "Forwarded"].iterrows():
         asset_id = str(row.get("assetId_str", ""))
         campaign_id = row.get("campaignId", "")
-        if asset_id and campaign_id and asset_id not in asset_user_map:
+        if asset_id and campaign_id:
             user = get_user(campaign_id)
             if user:
                 asset_user_map[asset_id] = user
