@@ -84,13 +84,29 @@ def generate_daily_report(target_date):
     campaign_map = {c.get("eloquaCampaignId"): c for c in campaign_analysis if c.get("eloquaCampaignId")}
     user_map = {u.get("userID"): u.get("userName", "") for u in campaign_users if u.get("userID")}
     
+    # Load contact cache to get proper-cased email addresses
+    from core.rest.fetch_data import load_contact_cache
+    contact_cache = load_contact_cache()
+    logger.info(f"Loaded {len(contact_cache)} contacts from cache for email case restoration")
+    
     # Create contact lookup from email_sends for forwarded emails
     contact_lookup = {}
+    debug_sample_count = 0
     for send in email_sends:
         cid = str(send.get("contactId", ""))
         if cid and cid not in contact_lookup:
+            # Get proper-cased email from cache if available
+            cached_contact = contact_cache.get(cid, {})
+            bulk_email = send.get("emailAddress", "")
+            proper_cased_email = cached_contact.get("emailAddress", bulk_email)
+            
+            # Debug: Print first 3 cases where we restored case
+            if debug_sample_count < 3 and proper_cased_email != bulk_email:
+                print(f"[DEBUG] Contact {cid}: Bulk='{bulk_email}' → Cache='{proper_cased_email}'")
+                debug_sample_count += 1
+            
             contact_lookup[cid] = {
-                "emailAddress": send.get("emailAddress", ""),
+                "emailAddress": proper_cased_email,  # Use cached email (proper case) if available
                 "contact_country": send.get("contact_country", ""),
                 "contact_hp_role": send.get("contact_hp_role", ""),
                 "contact_hp_partner_id": send.get("contact_hp_partner_id", ""),
@@ -118,13 +134,26 @@ def generate_daily_report(target_date):
 
     df_sends = pd.DataFrame(list(unique_sends_dict.values()))
     
+    # Log emailSendType distribution
+    if "emailSendType" in df_sends.columns:
+        send_type_counts = df_sends["emailSendType"].value_counts()
+        logger.info(f"EmailSendType distribution (before date filter): {dict(send_type_counts)}")
+    
     # Filter sends by target date
     df_sends["activityDateParsed"] = pd.to_datetime(df_sends["activityDate"], errors='coerce')
     df_sends = df_sends.dropna(subset=["activityDateParsed"]) # Drop rows that couldn't be parsed
+    if df_sends.empty:
+        logger.warning("No valid email sends with parseable dates. Aborting.")
+        return None
     df_sends = df_sends[df_sends["activityDateParsed"].dt.date == target_date_obj].copy()
     if df_sends.empty:
         logger.warning("No email sends found for target date %s. Aborting.", target_date)
         return None
+    
+    # Log emailSendType distribution after date filter
+    if "emailSendType" in df_sends.columns:
+        send_type_counts_after = df_sends["emailSendType"].value_counts()
+        logger.info(f"EmailSendType distribution (after date filter): {dict(send_type_counts_after)}")
     
     # Clean up key fields
     df_sends["contactId_str"] = df_sends["contactId"].astype(str)
@@ -196,175 +225,81 @@ def generate_daily_report(target_date):
             df_sends[col] = df_sends[col].fillna(0).astype(int)
     print(f"[PERF_DEBUG] Step 5b: NaNs filled in {time.time() - pd_step_start:.2f}s.")
     
-    # 5c. Identify forwarded emails (opens/clicks without sends) - VECTORIZED APPROACH
+    # 5c. Detect forwarded emails (opens/clicks without sends)
     pd_step_start = time.time()
+    forward_contacts = set()
     
-    # Combine opens and clicks to find all engagement without sends
-    engagement_list = []
+    # Get set of campaigns (asset IDs) that had sends on the target date
+    campaigns_with_sends = set(df_sends['assetId_str'].unique())
     
-    # Process opens
+    # Find contacts who opened or clicked but didn't receive the email
     if not df_opens.empty:
-        df_opens_filtered = df_opens.copy()
-        df_opens_filtered["activityDateParsed"] = pd.to_datetime(df_opens_filtered.get("openDateHour", ""), errors='coerce')
-        df_opens_filtered = df_opens_filtered[df_opens_filtered["activityDateParsed"].notna()]
-        df_opens_filtered = df_opens_filtered[df_opens_filtered["activityDateParsed"].dt.date == target_date_obj]
-        
-        if not df_opens_filtered.empty:
-            # Keep emailAddress if available
-            cols_to_keep = ["asset_id_str", "cid_str", "openDateHour"]
-            if "emailAddress" in df_opens_filtered.columns:
-                cols_to_keep.append("emailAddress")
-            
-            engagement_list.append(df_opens_filtered[cols_to_keep].rename(
-                columns={"openDateHour": "activityDate"}
-            ))
+        opens_set = set(zip(df_opens['asset_id_str'], df_opens['cid_str']))
+        sends_set = set(zip(df_sends['assetId_str'], df_sends['contactId_str']))
+        forward_contacts.update(opens_set - sends_set)
     
-    # Process clicks
-    if email_clickthroughs and not df_clicks.empty:
-        df_clicks_filtered = df_clicks.copy()
-        df_clicks_filtered["activityDateParsed"] = pd.to_datetime(df_clicks_filtered.get("clickDateHour", ""), errors='coerce')
-        df_clicks_filtered = df_clicks_filtered[df_clicks_filtered["activityDateParsed"].notna()]
-        df_clicks_filtered = df_clicks_filtered[df_clicks_filtered["activityDateParsed"].dt.date == target_date_obj]
-        
-        if not df_clicks_filtered.empty:
-            # Keep emailAddress if available
-            cols_to_keep = ["asset_id_str", "cid_str", "clickDateHour"]
-            if "emailAddress" in df_clicks_filtered.columns:
-                cols_to_keep.append("emailAddress")
-                
-            engagement_list.append(df_clicks_filtered[cols_to_keep].rename(
-                columns={"clickDateHour": "activityDate"}
-            ))
+    if not df_clicks.empty:
+        clicks_set = set(zip(df_clicks['asset_id_str'], df_clicks['cid_str']))
+        sends_set = set(zip(df_sends['assetId_str'], df_sends['contactId_str']))
+        forward_contacts.update(clicks_set - sends_set)
     
-    if engagement_list:
-        # Combine all engagement
-        df_engagement = pd.concat(engagement_list, ignore_index=True)
-        df_engagement = df_engagement.drop_duplicates(subset=["asset_id_str", "cid_str"])
-        
-        # Create merge key in both dataframes
-        df_sends["merge_key"] = df_sends["assetId_str"] + "_" + df_sends["contactId_str"]
-        df_engagement["merge_key"] = df_engagement["asset_id_str"] + "_" + df_engagement["cid_str"]
-        
-        # Find engagement without sends using anti-join
-        df_forwarded = df_engagement[~df_engagement["merge_key"].isin(df_sends["merge_key"])].copy()
-        
-        # Clean up merge_key column
-        df_sends.drop(columns=["merge_key"], inplace=True)
-        
-        if not df_forwarded.empty:
-            # Build forwarded email records
-            df_forwarded = df_forwarded.rename(columns={"asset_id_str": "assetId_str", "cid_str": "contactId_str"})
-            df_forwarded["assetId"] = df_forwarded["assetId_str"]
-            df_forwarded["contactId"] = df_forwarded["contactId_str"]
-            df_forwarded["assetId_int"] = pd.to_numeric(df_forwarded["assetId"], errors='coerce').fillna(0).astype(int)
-            
-            # Keep activityDate as datetime object for Email Send Date
-            # Convert to datetime and remove timezone info to match format of regular sends
-            df_forwarded["activityDateParsed"] = pd.to_datetime(df_forwarded["activityDate"], errors='coerce', utc=True).dt.tz_localize(None)
-            
-            df_forwarded["emailSendType"] = "Forwarded"
-            df_forwarded["assetName"] = ""
-            df_forwarded["campaignId"] = ""
-            df_forwarded["subjectLine"] = ""
-            
-            # Initialize contact fields
-            df_forwarded["emailAddress"] = ""
-            df_forwarded["contact_country"] = ""
-            df_forwarded["contact_hp_role"] = ""
-            df_forwarded["contact_hp_partner_id"] = ""
-            df_forwarded["contact_partner_name"] = ""
-            df_forwarded["contact_market"] = ""
-            
-            # Add engagement metrics
-            df_forwarded = df_forwarded.merge(df_open_counts, left_on=["assetId_str", "contactId_str"], right_on=open_key, how="left")
-            df_forwarded = df_forwarded.merge(df_click_counts, left_on=["assetId_str", "contactId_str"], right_on=click_key, how="left")
-            
-            # Forwarded emails have no sends or bouncebacks
-            df_forwarded["hard"] = 0
-            df_forwarded["soft"] = 0
-            df_forwarded["total_bb"] = 0
-            df_forwarded["total_opens"] = df_forwarded["total_opens"].fillna(0).astype(int)
-            df_forwarded["total_clicks"] = df_forwarded["total_clicks"].fillna(0).astype(int)
-            
-            # Enrich forwarded emails with asset and contact information using pre-built maps
-            df_forwarded["assetName"] = df_forwarded["assetId_int"].map(email_name_map).fillna("")
-            df_forwarded["subjectLine"] = df_forwarded["assetId_int"].map(email_subject_map).fillna("")
-            
-            # Enrich contact information from contact_lookup dictionary
-            def get_contact_field(contact_id, field):
-                contact = contact_lookup.get(str(contact_id), {})
-                return contact.get(field, "")
-            
-            # For emailAddress, keep the one from engagement data if available, otherwise use contact_lookup
-            if "emailAddress" not in df_forwarded.columns:
-                df_forwarded["emailAddress"] = ""
-            
-            df_forwarded["emailAddress_from_lookup"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "emailAddress"))
-            df_forwarded["emailAddress"] = df_forwarded.apply(
-                lambda row: row["emailAddress"] if pd.notna(row["emailAddress"]) and row["emailAddress"] != "" 
-                else row["emailAddress_from_lookup"], 
-                axis=1
-            )
-            df_forwarded.drop(columns=["emailAddress_from_lookup"], inplace=True)
-            
-            df_forwarded["contact_country"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_country"))
-            df_forwarded["contact_hp_role"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_hp_role"))
-            df_forwarded["contact_hp_partner_id"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_hp_partner_id"))
-            df_forwarded["contact_partner_name"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_partner_name"))
-            df_forwarded["contact_market"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_market"))
-            
-            # Fetch missing contact data from API for contacts not in lookup
-            missing_contacts = df_forwarded[
-                (df_forwarded["emailAddress"].isna() | (df_forwarded["emailAddress"] == ""))
-            ]["contactId_str"].unique().tolist()
-            
-            if missing_contacts:
-                logger.info(f"{len(missing_contacts)} forwarded contacts have no email address (not in sends)")
+    if forward_contacts:
+        forward_rows = []
+        for asset_id, contact_id in forward_contacts:
+            # Only include forwards for campaigns that had sends on this date
+            # This matches Eloqua Analytics behavior
+            if asset_id not in campaigns_with_sends:
+                continue
                 
-                # Ask user for confirmation before making API calls
-                from core.rest.fetch_data import fetch_contacts_batch
-                logger.info(f"Fetching missing contact data from API for {len(missing_contacts)} contacts...")
-                
-                additional_contacts = fetch_contacts_batch(missing_contacts, max_workers=5)
-                
-                if additional_contacts:
-                    logger.info(f"Retrieved {len(additional_contacts)} additional contacts from API")
-                    
-                    # Merge additional contacts into contact_lookup
-                    for cid, contact_data in additional_contacts.items():
-                        contact_lookup[cid] = {
-                            "emailAddress": contact_data.get("emailAddress", ""),
-                            "contact_country": contact_data.get("country", ""),
-                            "contact_hp_role": contact_data.get("hp_role", ""),
-                            "contact_hp_partner_id": contact_data.get("hp_partner_id", ""),
-                            "contact_partner_name": contact_data.get("partner_name", ""),
-                            "contact_market": contact_data.get("market", "")
-                        }
-                    
-                    # Re-apply contact enrichment for the newly fetched contacts
-                    df_forwarded["emailAddress"] = df_forwarded.apply(
-                        lambda row: row["emailAddress"] if pd.notna(row["emailAddress"]) and row["emailAddress"] != "" 
-                        else get_contact_field(row["contactId_str"], "emailAddress"), 
-                        axis=1
-                    )
-                    df_forwarded["contact_country"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_country"))
-                    df_forwarded["contact_hp_role"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_hp_role"))
-                    df_forwarded["contact_hp_partner_id"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_hp_partner_id"))
-                    df_forwarded["contact_partner_name"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_partner_name"))
-                    df_forwarded["contact_market"] = df_forwarded["contactId_str"].apply(lambda x: get_contact_field(x, "contact_market"))
+            # Get contact info from contact_lookup
+            contact_info = contact_lookup.get(contact_id, {})
             
-            # Log how many contacts are still missing email addresses after API fetch
-            missing_count = (df_forwarded["emailAddress"] == "").sum() + df_forwarded["emailAddress"].isna().sum()
-            if missing_count > 0:
-                logger.info(f"{missing_count} forwarded email contacts still have no email address after API fetch")
+            # Get email campaign info from asset maps
+            asset_id_int = int(asset_id) if asset_id and str(asset_id).isdigit() else -1
+            email_name = email_name_map.get(asset_id_int, "")
+            email_group = email_group_map.get(asset_id_int, "")
+            subject_line = email_subject_map.get(asset_id_int, "")
             
-            # Append forwarded emails to sends
-            df_sends = pd.concat([df_sends, df_forwarded], ignore_index=True)
-            print(f"[PERF_DEBUG] Step 5c: Added {len(df_forwarded)} forwarded email records in {time.time() - pd_step_start:.2f}s.")
+            # Get opens and clicks for this forward
+            opens_count = 0
+            clicks_count = 0
+            
+            if not df_opens.empty:
+                opens_count = len(df_opens[(df_opens['asset_id_str'] == asset_id) & 
+                                          (df_opens['cid_str'] == contact_id)])
+            
+            if not df_clicks.empty:
+                clicks_count = len(df_clicks[(df_clicks['asset_id_str'] == asset_id) & 
+                                            (df_clicks['cid_str'] == contact_id)])
+            
+            forward_rows.append({
+                'assetId_str': asset_id,
+                'contactId_str': contact_id,
+                'assetName': email_name,
+                'emailGroup': email_group,
+                'subjectLine': subject_line,
+                'emailAddress': contact_info.get('emailAddress', ''),
+                'contact_country': contact_info.get('contact_country', ''),
+                'contact_hp_role': contact_info.get('contact_hp_role', ''),
+                'contact_hp_partner_id': contact_info.get('contact_hp_partner_id', ''),
+                'contact_partner_name': contact_info.get('contact_partner_name', ''),
+                'contact_market': contact_info.get('contact_market', ''),
+                'emailSendType': 'EmailForward',
+                'total_opens': opens_count,
+                'total_clicks': clicks_count,
+                'hard': 0,
+                'soft': 0,
+                'total_bb': 0
+            })
+        
+        if forward_rows:
+            df_forwards = pd.DataFrame(forward_rows)
+            df_sends = pd.concat([df_sends, df_forwards], ignore_index=True)
+            print(f"[PERF_DEBUG] Step 5c: Detected {len(forward_rows)} forwarded emails (anti-join) in {time.time() - pd_step_start:.2f}s.")
         else:
-            print(f"[PERF_DEBUG] Step 5c: No forwarded emails found in {time.time() - pd_step_start:.2f}s.")
+            print(f"[PERF_DEBUG] Step 5c: No forwarded emails detected in {time.time() - pd_step_start:.2f}s.")
     else:
-        print(f"[PERF_DEBUG] Step 5c: No engagement data to check for forwards in {time.time() - pd_step_start:.2f}s.")
+        print(f"[PERF_DEBUG] Step 5c: No forwarded emails detected in {time.time() - pd_step_start:.2f}s.")
     
 
     # 6. Load and Merge Data
@@ -452,8 +387,51 @@ def generate_daily_report(target_date):
     # df_sends = df_sends[df_sends["Last Activated by User"] != ""].copy()
     print(f"[PERF_DEBUG] Skipping user filter, keeping all {len(df_sends)} rows.")
         
+    # Filter out emails matching Eloqua Analytics exclusion criteria
+    initial_count = len(df_sends)
+    
+    # Exclude @hp.com emails
     df_sends = df_sends[~df_sends["emailAddress"].str.lower().str.contains("@hp.com", na=False)]
-    print(f"[PERF_DEBUG] Filtered @hp.com emails, {len(df_sends)} rows remaining.")
+    
+    # Exclude specific test/spam email addresses from Eloqua Analytics filter
+    excluded_emails = [
+        "y_110@hotmail.com",
+        "1021001399@qq.com",
+        "2604815709@qq.com",
+        "496707864@qq.com"
+    ]
+    df_sends = df_sends[~df_sends["emailAddress"].str.lower().isin([e.lower() for e in excluded_emails])]
+    
+    # Filter out incomplete forward records (forwards with no email address or no activity)
+    # These are data artifacts where we detected activity but have no valid contact info
+    before_forward_filter = len(df_sends)
+    incomplete_forwards = (df_sends["emailSendType"] == "EmailForward") & (
+        (df_sends["emailAddress"].isna()) | 
+        (df_sends["emailAddress"] == "") |
+        ((df_sends["total_opens"] == 0) & (df_sends["total_clicks"] == 0))  # Filter only if NO opens AND NO clicks
+    )
+    df_sends = df_sends[~incomplete_forwards]
+    incomplete_count = before_forward_filter - len(df_sends)
+    if incomplete_count > 0:
+        print(f"[PERF_DEBUG] Filtered out {incomplete_count} incomplete forward records (no email address or no activity).")
+    
+    print(f"[PERF_DEBUG] Filtered @hp.com and excluded test emails, {len(df_sends)} rows remaining (removed {initial_count - len(df_sends)}).")
+
+    # Restore proper email case from contact_lookup (Bulk API returns lowercase, but we want original case)
+    def get_proper_cased_email(contact_id, lowercase_email):
+        """Get the proper-cased email from contact_lookup, fallback to lowercase if not found"""
+        contact = contact_lookup.get(str(contact_id), {})
+        cached_email = contact.get("emailAddress", "")
+        # Only use cached email if it matches (case-insensitive)
+        if cached_email and cached_email.lower() == lowercase_email.lower():
+            return cached_email
+        return lowercase_email
+    
+    df_sends["emailAddress"] = df_sends.apply(
+        lambda row: get_proper_cased_email(row["contactId_str"], row["emailAddress"]),
+        axis=1
+    )
+    print(f"[PERF_DEBUG] Restored proper email case from contact lookup.")
 
     df_sends["Email Group"] = df_sends["assetId_int"].map(email_group_map).fillna("")
     
@@ -517,7 +495,8 @@ def generate_daily_report(target_date):
     df_report = df_report[final_columns_ordered]
     
     # Format Email Send Date - it's already a datetime, just needs formatting
-    df_report["Email Send Date"] = df_report["Email Send Date"].dt.strftime("%Y-%m-%d %I:%M:%S %p")
+    if not df_report.empty and pd.api.types.is_datetime64_any_dtype(df_report["Email Send Date"]):
+        df_report["Email Send Date"] = df_report["Email Send Date"].dt.strftime("%Y-%m-%d %I:%M:%S %p")
     df_report["Email Address"] = df_report["Email Address"].str.lower()
     print(f"[PERF_DEBUG] Step 8: Final column renaming and formatting in {time.time() - pd_step_start:.2f}s.")
     
