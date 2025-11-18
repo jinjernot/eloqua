@@ -356,7 +356,7 @@ def generate_daily_report(target_date):
                 asset_user_map[asset_id] = user
     
     # Then, override with campaign user from regular sends if available (more specific)
-    for _, row in df_sends[df_sends["emailSendType"] != "Forwarded"].iterrows():
+    for _, row in df_sends[df_sends["emailSendType"] != "EmailForward"].iterrows():
         asset_id = str(row.get("assetId_str", ""))
         campaign_id = row.get("campaignId", "")
         if asset_id and campaign_id:
@@ -368,7 +368,7 @@ def generate_daily_report(target_date):
     
     # Apply user lookup - for regular sends use campaign, for forwarded use asset lookup
     def get_user_for_row(row):
-        if row["emailSendType"] == "Forwarded":
+        if row["emailSendType"] == "EmailForward":
             asset_id = str(row["assetId_str"])
             user = asset_user_map.get(asset_id, "")
             if not user:
@@ -380,7 +380,7 @@ def generate_daily_report(target_date):
     df_sends["Last Activated by User"] = df_sends.apply(get_user_for_row, axis=1)
     
     # Debug: Check user population for forwarded emails
-    forwarded_mask = df_sends["emailSendType"] == "Forwarded"
+    forwarded_mask = df_sends["emailSendType"] == "EmailForward"
     users_populated = (df_sends[forwarded_mask]["Last Activated by User"] != "").sum()
     logger.info(f"Last Activated by User populated for {users_populated}/{forwarded_mask.sum()} forwarded emails")
     
