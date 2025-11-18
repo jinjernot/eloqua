@@ -225,23 +225,19 @@ def generate_daily_report(target_date):
             df_sends[col] = df_sends[col].fillna(0).astype(int)
     print(f"[PERF_DEBUG] Step 5b: NaNs filled in {time.time() - pd_step_start:.2f}s.")
     
-    # 5c. Detect forwarded emails (opens/clicks without sends)
+    # 5c. Detect forwarded emails (opens without sends)
+    # Manual reports only detect forwards via opens, not clicks
     pd_step_start = time.time()
     forward_contacts = set()
     
     # Get set of campaigns (asset IDs) that had sends on the target date
     campaigns_with_sends = set(df_sends['assetId_str'].unique())
     
-    # Find contacts who opened or clicked but didn't receive the email
+    # Find contacts who opened but didn't receive the email (forwards)
     if not df_opens.empty:
         opens_set = set(zip(df_opens['asset_id_str'], df_opens['cid_str']))
         sends_set = set(zip(df_sends['assetId_str'], df_sends['contactId_str']))
         forward_contacts.update(opens_set - sends_set)
-    
-    if not df_clicks.empty:
-        clicks_set = set(zip(df_clicks['asset_id_str'], df_clicks['cid_str']))
-        sends_set = set(zip(df_sends['assetId_str'], df_sends['contactId_str']))
-        forward_contacts.update(clicks_set - sends_set)
     
     if forward_contacts:
         forward_rows = []
@@ -274,9 +270,9 @@ def generate_daily_report(target_date):
             
             forward_rows.append({
                 'assetId_str': asset_id,
+                'assetId_int': asset_id_int,  # Add this for Email Group mapping
                 'contactId_str': contact_id,
                 'assetName': email_name,
-                'emailGroup': email_group,
                 'subjectLine': subject_line,
                 'emailAddress': contact_info.get('emailAddress', ''),
                 'contact_country': contact_info.get('contact_country', ''),
