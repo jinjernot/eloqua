@@ -2,6 +2,7 @@ import os
 import requests
 import time
 import json
+import gzip
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from auth import get_valid_access_token
@@ -9,7 +10,7 @@ from config import *
 from core.utils import save_json
 
 DATA_DIR = "data"
-CONTACT_CACHE_FILE = "data/contact_cache.json"
+CONTACT_CACHE_FILE = "data/contact_cache.json.gz"  # Now compressed
 
 def fetch_data(endpoint, filename, extra_params=None):
     access_token = get_valid_access_token()
@@ -43,29 +44,45 @@ def fetch_data(endpoint, filename, extra_params=None):
 
 def load_contact_cache():
     """
-    Load previously fetched contacts from cache file.
+    Load previously fetched contacts from compressed cache file.
     
     Returns:
         Dictionary mapping contact_id (str) to contact data, or empty dict if cache doesn't exist
     """
     cache_path = Path(CONTACT_CACHE_FILE)
+    
+    # Try loading compressed cache first
     if cache_path.exists():
         try:
-            with open(cache_path, 'r', encoding='utf-8') as f:
+            with gzip.open(cache_path, 'rt', encoding='utf-8') as f:
                 cache = json.load(f)
-                print(f"[CACHE] Loaded {len(cache)} contacts from cache")
+                print(f"[CACHE] Loaded {len(cache)} contacts from compressed cache")
                 return cache
         except Exception as e:
-            print(f"[CACHE] Warning: Could not load contact cache: {e}")
-            return {}
-    else:
-        print(f"[CACHE] No existing cache found, will create new one")
+            print(f"[CACHE] Warning: Could not load compressed cache: {e}")
+            
+    # Fallback: try loading old uncompressed cache
+    old_cache_path = Path("data/contact_cache.json")
+    if old_cache_path.exists():
+        try:
+            with open(old_cache_path, 'r', encoding='utf-8') as f:
+                cache = json.load(f)
+                print(f"[CACHE] Loaded {len(cache)} contacts from old uncompressed cache")
+                print(f"[CACHE] Converting to compressed format...")
+                save_contact_cache(cache)  # Save in new compressed format
+                print(f"[CACHE] Old cache backed up, you can delete data/contact_cache.json")
+                return cache
+        except Exception as e:
+            print(f"[CACHE] Warning: Could not load old cache: {e}")
+            
+    print(f"[CACHE] No existing cache found, will create new one")
     return {}
 
 
 def save_contact_cache(cache):
     """
-    Save contact cache to JSON file.
+    Save contact cache to compressed JSON file with proper UTF-8 encoding.
+    Uses gzip compression to reduce file size significantly.
     
     Args:
         cache: Dictionary mapping contact_id (str) to contact data
@@ -73,9 +90,12 @@ def save_contact_cache(cache):
     cache_path = Path(CONTACT_CACHE_FILE)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with open(cache_path, 'w', encoding='utf-8') as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-        print(f"[CACHE] Saved {len(cache)} contacts to cache")
+        with gzip.open(cache_path, 'wt', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False, separators=(',', ':'))  # Compact format
+        
+        # Get file size for reporting
+        size_mb = cache_path.stat().st_size / (1024 * 1024)
+        print(f"[CACHE] Saved {len(cache)} contacts to compressed cache ({size_mb:.2f} MB)")
     except Exception as e:
         print(f"[CACHE] Warning: Could not save contact cache: {e}")
 

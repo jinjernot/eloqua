@@ -9,3 +9,4 @@ auth_pro.py
 run_daily.py
 .venv
 email_downloads
+contact_cache.json.gz
