@@ -81,23 +81,36 @@ def load_contact_cache():
 
 def save_contact_cache(cache):
     """
-    Save contact cache to compressed JSON file with proper UTF-8 encoding.
-    Uses gzip compression to reduce file size significantly.
+    Save contact cache to both compressed and uncompressed JSON files.
+    Compressed version is used for loading (faster I/O).
+    Uncompressed version is kept as human-readable backup.
     
     Args:
         cache: Dictionary mapping contact_id (str) to contact data
     """
     cache_path = Path(CONTACT_CACHE_FILE)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Save compressed version (primary)
     try:
         with gzip.open(cache_path, 'wt', encoding='utf-8') as f:
             json.dump(cache, f, ensure_ascii=False, separators=(',', ':'))  # Compact format
         
-        # Get file size for reporting
         size_mb = cache_path.stat().st_size / (1024 * 1024)
         print(f"[CACHE] Saved {len(cache)} contacts to compressed cache ({size_mb:.2f} MB)")
     except Exception as e:
-        print(f"[CACHE] Warning: Could not save contact cache: {e}")
+        print(f"[CACHE] Warning: Could not save compressed cache: {e}")
+    
+    # Save uncompressed version (backup)
+    try:
+        backup_path = Path("data/contact_cache.json")
+        with open(backup_path, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        
+        backup_size_mb = backup_path.stat().st_size / (1024 * 1024)
+        print(f"[CACHE] Saved backup to uncompressed cache ({backup_size_mb:.2f} MB)")
+    except Exception as e:
+        print(f"[CACHE] Warning: Could not save backup cache: {e}")
 
 
 def fetch_contact_by_id(contact_id):
