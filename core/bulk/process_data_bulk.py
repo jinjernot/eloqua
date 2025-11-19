@@ -240,6 +240,18 @@ def generate_daily_report(target_date):
         forward_contacts.update(opens_set - sends_set)
     
     if forward_contacts:
+        # Pre-compute opens and clicks counts using groupby (much faster than row-by-row)
+        opens_counts = {}
+        clicks_counts = {}
+        
+        if not df_opens.empty:
+            opens_grouped = df_opens.groupby(['asset_id_str', 'cid_str']).size()
+            opens_counts = opens_grouped.to_dict()
+        
+        if not df_clicks.empty:
+            clicks_grouped = df_clicks.groupby(['asset_id_str', 'cid_str']).size()
+            clicks_counts = clicks_grouped.to_dict()
+        
         forward_rows = []
         for asset_id, contact_id in forward_contacts:
             # Only include forwards for campaigns that had sends on this date
@@ -256,17 +268,9 @@ def generate_daily_report(target_date):
             email_group = email_group_map.get(asset_id_int, "")
             subject_line = email_subject_map.get(asset_id_int, "")
             
-            # Get opens and clicks for this forward
-            opens_count = 0
-            clicks_count = 0
-            
-            if not df_opens.empty:
-                opens_count = len(df_opens[(df_opens['asset_id_str'] == asset_id) & 
-                                          (df_opens['cid_str'] == contact_id)])
-            
-            if not df_clicks.empty:
-                clicks_count = len(df_clicks[(df_clicks['asset_id_str'] == asset_id) & 
-                                            (df_clicks['cid_str'] == contact_id)])
+            # Get opens and clicks counts from pre-computed dictionaries
+            opens_count = opens_counts.get((asset_id, contact_id), 0)
+            clicks_count = clicks_counts.get((asset_id, contact_id), 0)
             
             forward_rows.append({
                 'assetId_str': asset_id,
