@@ -6,6 +6,7 @@ import pandas as pd
 import csv
 import os
 from core.bulk.fetch_data_bulk import fetch_and_save_data
+from core.rest.fetch_data import fetch_contacts_batch, save_contact_cache
 
 from core.rest.fetch_email_content import fetch_email_html 
 
@@ -232,31 +233,150 @@ def generate_daily_report(target_date):
     
     # Get set of campaigns (asset IDs) that had sends on the target date
     campaigns_with_sends = set(df_sends['assetId_str'].unique())
+    print(f"[CAMPAIGNS_DEBUG] Campaigns with sends: {sorted(campaigns_with_sends)}")
+    
+    # Initialize filtered dataframes
+    df_opens_filtered = pd.DataFrame()
+    df_clicks_filtered = pd.DataFrame()
     
     # Find contacts who opened but didn't receive the email (forwards)
+    # IMPORTANT: Only consider opens for campaigns that had sends on the target date
     if not df_opens.empty:
-        opens_set = set(zip(df_opens['asset_id_str'], df_opens['cid_str']))
+        # Filter opens to only campaigns that had sends on target date
+        df_opens_filtered = df_opens[df_opens['asset_id_str'].isin(campaigns_with_sends)]
+        
+        opens_set = set(zip(df_opens_filtered['asset_id_str'], df_opens_filtered['cid_str']))
         sends_set = set(zip(df_sends['assetId_str'], df_sends['contactId_str']))
         forward_contacts.update(opens_set - sends_set)
+        
+        # Debug: Log forward detection statistics
+        debug_msg = f"[FORWARD_DEBUG] Total opens fetched: {len(df_opens)}\n"
+        debug_msg += f"[FORWARD_DEBUG] Opens after filtering to campaigns with sends: {len(df_opens_filtered)}\n"
+        debug_msg += f"[FORWARD_DEBUG] Campaigns with sends on target date: {len(campaigns_with_sends)}\n"
+        debug_msg += f"[FORWARD_DEBUG] Opens set size: {len(opens_set)}\n"
+        debug_msg += f"[FORWARD_DEBUG] Sends set size: {len(sends_set)}\n"
+        debug_msg += f"[FORWARD_DEBUG] Potential forwards detected: {len(forward_contacts)}\n"
+        
+        # Check for opens for Campaign 15269 (the main missing campaign)
+        campaign_15269_opens = [(a, c) for a, c in opens_set if a == '15269']
+        campaign_15269_sends = [(a, c) for a, c in sends_set if a == '15269']
+        debug_msg += f"[FORWARD_DEBUG] Campaign 15269: {len(campaign_15269_opens)} opens, {len(campaign_15269_sends)} sends\n"
+        
+        # Debug: Check for specific missing forwards
+        sample_check = [
+            ('15269', '389436'),  # Email ID 15269, Contact ID 389436
+            ('15269', '6059'),
+            ('15269', '9343')
+        ]
+        for asset, cid in sample_check:
+            in_opens = (asset, cid) in opens_set
+            in_sends = (asset, cid) in sends_set
+            in_forwards = (asset, cid) in forward_contacts
+            debug_msg += f"[FORWARD_DEBUG] Asset {asset}, Contact {cid}: Opens={in_opens}, Sends={in_sends}, Forward={in_forwards}\n"
+        
+        print(debug_msg)
+        with open('forward_debug.log', 'w') as f:
+            f.write(debug_msg)
+    
+    # Add forward contacts to contact_lookup by fetching from cache
+    if forward_contacts:
+        print(f"[FORWARD_LOOKUP_DEBUG] Adding {len(forward_contacts)} forward contacts to contact_lookup...")
+        contacts_added = 0
+        contacts_not_in_cache = []
+        
+        for asset_id, contact_id in forward_contacts:
+            if contact_id not in contact_lookup:
+                # Try to get contact info from cache
+                if contact_id in contact_cache:
+                    cached_contact = contact_cache[contact_id]
+                    contact_lookup[contact_id] = {
+                        "emailAddress": cached_contact.get("emailAddress", ""),
+                        "contact_country": cached_contact.get("contact_country", ""),
+                        "contact_hp_role": cached_contact.get("contact_hp_role", ""),
+                        "contact_hp_partner_id": cached_contact.get("contact_hp_partner_id", ""),
+                        "contact_partner_name": cached_contact.get("contact_partner_name", ""),
+                        "contact_market": cached_contact.get("contact_market", "")
+                    }
+                    contacts_added += 1
+                else:
+                    contacts_not_in_cache.append(contact_id)
+        
+        print(f"[FORWARD_LOOKUP_DEBUG] Added {contacts_added} forward contacts from cache")
+        print(f"[FORWARD_LOOKUP_DEBUG] {len(contacts_not_in_cache)} forward contacts not found in cache")
+        
+        # Fetch missing contacts from Eloqua API
+        if contacts_not_in_cache:
+            print(f"[FORWARD_LOOKUP_DEBUG] Fetching {len(contacts_not_in_cache)} missing contacts from Eloqua API...")
+            try:
+                # Fetch contacts in batch
+                fetched_contacts = fetch_contacts_batch(contacts_not_in_cache, max_workers=10, use_cache=False)
+                
+                if fetched_contacts:
+                    print(f"[FORWARD_LOOKUP_DEBUG] Successfully fetched {len(fetched_contacts)} contacts from API")
+                    
+                    # Add fetched contacts to both contact_lookup and contact_cache
+                    for contact_id, contact_data in fetched_contacts.items():
+                        contact_lookup[contact_id] = {
+                            "emailAddress": contact_data.get("emailAddress", ""),
+                            "contact_country": contact_data.get("contact_country", ""),
+                            "contact_hp_role": contact_data.get("contact_hp_role", ""),
+                            "contact_hp_partner_id": contact_data.get("contact_hp_partner_id", ""),
+                            "contact_partner_name": contact_data.get("contact_partner_name", ""),
+                            "contact_market": contact_data.get("contact_market", "")
+                        }
+                        
+                        # Also add to cache for future use
+                        contact_cache[contact_id] = contact_data
+                    
+                    # Save updated cache
+                    print(f"[FORWARD_LOOKUP_DEBUG] Saving updated cache with {len(fetched_contacts)} new contacts...")
+                    save_contact_cache(contact_cache)
+                    print(f"[FORWARD_LOOKUP_DEBUG] Cache saved successfully")
+                else:
+                    print(f"[FORWARD_LOOKUP_DEBUG] ⚠️ No contacts returned from API")
+                    
+            except Exception as e:
+                print(f"[FORWARD_LOOKUP_DEBUG] ⚠️ Error fetching contacts from API: {e}")
+                logger.warning(f"Failed to fetch missing forward contacts: {e}")
+        
+        print(f"[FORWARD_LOOKUP_DEBUG] Total contacts in lookup now: {len(contact_lookup)}")
     
     if forward_contacts:
         # Pre-compute opens and clicks counts using groupby (much faster than row-by-row)
+        # Use filtered dataframes that only include campaigns with sends on target date
         opens_counts = {}
         clicks_counts = {}
         
-        if not df_opens.empty:
-            opens_grouped = df_opens.groupby(['asset_id_str', 'cid_str']).size()
+        if not df_opens_filtered.empty:
+            opens_grouped = df_opens_filtered.groupby(['asset_id_str', 'cid_str']).size()
             opens_counts = opens_grouped.to_dict()
+            print(f"[OPENS_COUNTS_DEBUG] opens_counts dictionary size: {len(opens_counts)}")
+            # Check if our sample forwards are in opens_counts
+            sample_keys = [('15269', '389436'), ('15269', '6059'), ('15269', '9343')]
+            for key in sample_keys:
+                count = opens_counts.get(key, 0)
+                print(f"[OPENS_COUNTS_DEBUG] Key {key}: {count} opens")
         
         if not df_clicks.empty:
-            clicks_grouped = df_clicks.groupby(['asset_id_str', 'cid_str']).size()
-            clicks_counts = clicks_grouped.to_dict()
+            # Filter clicks to only campaigns with sends on target date
+            df_clicks_filtered = df_clicks[df_clicks['asset_id_str'].isin(campaigns_with_sends)]
+            if not df_clicks_filtered.empty:
+                clicks_grouped = df_clicks_filtered.groupby(['asset_id_str', 'cid_str']).size()
+                clicks_counts = clicks_grouped.to_dict()
         
         forward_rows = []
+        skipped_not_in_campaigns = 0
+        skipped_no_opens = 0
+        created_rows = 0
+        
+        # Track which campaigns we're creating forwards for
+        forward_campaigns_created = {}
+        
         for asset_id, contact_id in forward_contacts:
             # Only include forwards for campaigns that had sends on this date
             # This matches Eloqua Analytics behavior
             if asset_id not in campaigns_with_sends:
+                skipped_not_in_campaigns += 1
                 continue
                 
             # Get contact info from contact_lookup
@@ -271,6 +391,18 @@ def generate_daily_report(target_date):
             # Get opens and clicks counts from pre-computed dictionaries
             opens_count = opens_counts.get((asset_id, contact_id), 0)
             clicks_count = clicks_counts.get((asset_id, contact_id), 0)
+            
+            # Skip if no opens found (shouldn't happen for forwards, but safety check)
+            if opens_count == 0:
+                skipped_no_opens += 1
+                continue
+            
+            created_rows += 1
+            
+            # Track campaigns
+            if asset_id not in forward_campaigns_created:
+                forward_campaigns_created[asset_id] = 0
+            forward_campaigns_created[asset_id] += 1
             
             forward_rows.append({
                 'assetId_str': asset_id,
@@ -292,10 +424,29 @@ def generate_daily_report(target_date):
                 'total_bb': 0
             })
         
+        print(f"[FORWARD_CREATION_DEBUG] Forwards in set: {len(forward_contacts)}")
+        print(f"[FORWARD_CREATION_DEBUG] Rows created: {created_rows}")
+        print(f"[FORWARD_CREATION_DEBUG] Skipped (not in campaigns): {skipped_not_in_campaigns}")
+        print(f"[FORWARD_CREATION_DEBUG] Skipped (no opens count): {skipped_no_opens}")
+        print(f"[FORWARD_CREATION_DEBUG] Final forward_rows: {len(forward_rows)}")
+        print(f"[FORWARD_CREATION_DEBUG] Forward campaigns: {sorted(forward_campaigns_created.keys())}")
+        print(f"[FORWARD_CREATION_DEBUG] Forward counts by campaign: {dict(sorted(forward_campaigns_created.items()))}")
+        
         if forward_rows:
             df_forwards = pd.DataFrame(forward_rows)
+            print(f"[FORWARD_DF_DEBUG] df_forwards shape: {df_forwards.shape}")
+            print(f"[FORWARD_DF_DEBUG] df_forwards columns: {df_forwards.columns.tolist()}")
+            print(f"[FORWARD_DF_DEBUG] total_opens in df_forwards: min={df_forwards['total_opens'].min()}, max={df_forwards['total_opens'].max()}, mean={df_forwards['total_opens'].mean():.2f}")
+            print(f"[FORWARD_DF_DEBUG] Forwards with total_opens > 0: {(df_forwards['total_opens'] > 0).sum()}")
+            print(f"[FORWARD_DF_DEBUG] Forwards with total_opens == 0: {(df_forwards['total_opens'] == 0).sum()}")
+            
             df_sends = pd.concat([df_sends, df_forwards], ignore_index=True)
             print(f"[PERF_DEBUG] Step 5c: Detected {len(forward_rows)} forwarded emails (anti-join) in {time.time() - pd_step_start:.2f}s.")
+            print(f"[MERGE_DEBUG] df_sends length after merge: {len(df_sends)}")
+            print(f"[MERGE_DEBUG] EmailForward count after merge: {(df_sends['emailSendType'] == 'EmailForward').sum()}")
+            print(f"[MERGE_DEBUG] Forwards with total_opens > 0 after merge: {((df_sends['emailSendType'] == 'EmailForward') & (df_sends['total_opens'] > 0)).sum()}")
+            print(f"[MERGE_DEBUG] Forwards with total_opens == 0 after merge: {((df_sends['emailSendType'] == 'EmailForward') & (df_sends['total_opens'] == 0)).sum()}")
+            print(f"[MERGE_DEBUG] Forwards with total_opens NaN after merge: {((df_sends['emailSendType'] == 'EmailForward') & (df_sends['total_opens'].isna())).sum()}")
         else:
             print(f"[PERF_DEBUG] Step 5c: No forwarded emails detected in {time.time() - pd_step_start:.2f}s.")
     else:
@@ -405,6 +556,14 @@ def generate_daily_report(target_date):
     # Filter out incomplete forward records (forwards with no email address or no activity)
     # These are data artifacts where we detected activity but have no valid contact info
     before_forward_filter = len(df_sends)
+    
+    # Debug: Check forwards before filtering
+    forwards_before = df_sends[df_sends["emailSendType"] == "EmailForward"]
+    print(f"[FILTER_DEBUG] Forwards before filtering: {len(forwards_before)}")
+    print(f"[FILTER_DEBUG] Forwards with NaN email: {forwards_before['emailAddress'].isna().sum()}")
+    print(f"[FILTER_DEBUG] Forwards with empty email: {(forwards_before['emailAddress'] == '').sum()}")
+    print(f"[FILTER_DEBUG] Forwards with no activity: {((forwards_before['total_opens'] == 0) & (forwards_before['total_clicks'] == 0)).sum()}")
+    
     incomplete_forwards = (df_sends["emailSendType"] == "EmailForward") & (
         (df_sends["emailAddress"].isna()) | 
         (df_sends["emailAddress"] == "") |
@@ -416,6 +575,23 @@ def generate_daily_report(target_date):
         print(f"[PERF_DEBUG] Filtered out {incomplete_count} incomplete forward records (no email address or no activity).")
     
     print(f"[PERF_DEBUG] Filtered @hp.com and excluded test emails, {len(df_sends)} rows remaining (removed {initial_count - len(df_sends)}).")
+    
+    # After filtering, remove forwards for campaigns that no longer have any sends
+    # This matches Eloqua Analytics behavior: forwards only shown if campaign has valid sends
+    campaigns_after_filtering = set(df_sends[df_sends['emailSendType'] == 'EmailSend']['assetId_str'].unique())
+    forwards_before = (df_sends['emailSendType'].isin(['EmailForward', 'Forwarded'])).sum()
+    
+    # Remove forwards for campaigns without sends
+    forwards_to_remove = (
+        df_sends['emailSendType'].isin(['EmailForward', 'Forwarded']) & 
+        ~df_sends['assetId_str'].isin(campaigns_after_filtering)
+    )
+    removed_forwards = forwards_to_remove.sum()
+    df_sends = df_sends[~forwards_to_remove]
+    
+    print(f"[FILTER_DEBUG] Campaigns after filtering: {len(campaigns_after_filtering)}")
+    print(f"[FILTER_DEBUG] Removed {removed_forwards} forwards from campaigns without valid sends")
+    print(f"[FILTER_DEBUG] Forwards remaining: {forwards_before - removed_forwards}")
 
     # Restore proper email case from contact_lookup (Bulk API returns lowercase, but we want original case)
     def get_proper_cased_email(contact_id, lowercase_email):
@@ -436,9 +612,9 @@ def generate_daily_report(target_date):
     df_sends["Email Group"] = df_sends["assetId_int"].map(email_group_map).fillna("")
     
     # For forwarded emails, Total Sends and Total Delivered should be blank/0
-    df_sends["Total Sends"] = df_sends["emailSendType"].apply(lambda x: 0 if x == "Forwarded" else 1)
+    df_sends["Total Sends"] = df_sends["emailSendType"].apply(lambda x: 0 if x in ["Forwarded", "EmailForward"] else 1)
     df_sends["Total Delivered"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] == "Forwarded" else (1 if row["total_bb"] == 0 else 0), 
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else (1 if row["total_bb"] == 0 else 0), 
         axis=1
     )
     

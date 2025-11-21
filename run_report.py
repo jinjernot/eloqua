@@ -10,8 +10,16 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from core.bulk.process_data_bulk import generate_daily_report
-from core.aws.s3_utils import upload_to_s3, ping_s3_bucket
-from config import S3_BUCKET_NAME, S3_FOLDER_PATH, SAVE_LOCALLY
+from config import SAVE_LOCALLY
+
+# Conditionally import S3 utils only if needed
+if not SAVE_LOCALLY:
+    try:
+        from core.aws.s3_utils import upload_to_s3, ping_s3_bucket
+        from config import S3_BUCKET_NAME, S3_FOLDER_PATH
+    except ImportError:
+        logging.error("boto3 not installed. Install with: pip install boto3")
+        sys.exit(1)
 
 if __name__ == "__main__":
     

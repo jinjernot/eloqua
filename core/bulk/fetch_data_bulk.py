@@ -31,6 +31,10 @@ def fetch_and_save_data(target_date=None):
     bounceback_end_date = start + timedelta(days=7)
     end_str_bounceback = bounceback_end_date.strftime("%Y-%m-%dT00:00:00Z")
 
+    # For engagement (opens/clicks), look back 30 days BEFORE the target date
+    # This captures forwards where someone opened an email that was sent earlier
+    engagement_start_date = start - timedelta(days=30)
+    engagement_start_str = engagement_start_date.strftime("%Y-%m-%dT00:00:00Z")
     engagement_end_date = start + timedelta(days=30)
     end_str_engagement = engagement_end_date.strftime("%Y-%m-%dT00:00:00Z")
 
@@ -41,8 +45,8 @@ def fetch_and_save_data(target_date=None):
             executor.submit(fetch_email_sends_bulk, start_str, end_str): "email_sends",
             
             executor.submit(fetch_data, BOUNCEBACK_OData_ENDPOINT, "bouncebacks_odata.json", extra_params={"$filter": f"bounceBackDateHour ge {start_str} and bounceBackDateHour lt {end_str_bounceback}"}): "bouncebacks",
-            executor.submit(fetch_data, CLICKTHROUGH_ENDPOINT, "email_clickthrough.json", extra_params={"$filter": f"clickDateHour ge {start_str} and clickDateHour lt {end_str_engagement}"}): "email_clickthroughs",
-            executor.submit(fetch_data, EMAIL_OPEN_ENDPOINT, "email_open.json", extra_params={"$filter": f"openDateHour ge {start_str} and openDateHour lt {end_str_engagement}"}): "email_opens",
+            executor.submit(fetch_data, CLICKTHROUGH_ENDPOINT, "email_clickthrough.json", extra_params={"$filter": f"clickDateHour ge {engagement_start_str} and clickDateHour lt {end_str_engagement}"}): "email_clickthroughs",
+            executor.submit(fetch_data, EMAIL_OPEN_ENDPOINT, "email_open.json", extra_params={"$filter": f"openDateHour ge {engagement_start_str} and openDateHour lt {end_str_engagement}"}): "email_opens",
             executor.submit(fetch_data, CAMPAIGN_ANALYSIS_ENDPOINT, "campaign.json"): "campaign_analysis",
             executor.submit(fetch_data, CAMPAIGN_USERS_ENDPOINT, "campaign_users.json"): "campaign_users",
             executor.submit(fetch_data, EMAIL_ASSET_ENDPOINT, "email_asset.json"): "email_asset_data"
