@@ -7,7 +7,17 @@ import csv
 import traceback
 from datetime import datetime, timedelta
 from core.bulk.process_data_bulk import generate_daily_report
+from config import SAVE_LOCALLY
 import logging
+
+# Conditionally import S3 utils
+if not SAVE_LOCALLY:
+    try:
+        from core.aws.s3_utils import upload_to_s3, ping_s3_bucket
+        from config import S3_BUCKET_NAME, S3_FOLDER_PATH
+    except ImportError:
+        logging.error("boto3 not installed. Install with: pip install boto3")
+        sys.exit(1)
 
 # Setup logging
 logging.basicConfig(
@@ -26,6 +36,19 @@ def run_multi_day_reports(num_days=100):
     print(f"  MULTI-DAY REPORT GENERATION")
     print(f"  Running reports for the last {num_days} days")
     print(f"{'='*70}\n")
+    
+    # Check S3 connectivity if upload is enabled
+    if not SAVE_LOCALLY:
+        logging.info("S3 upload is enabled. Checking S3 connectivity...")
+        is_s3_ok, s3_message = ping_s3_bucket(S3_BUCKET_NAME)
+        if not is_s3_ok:
+            logging.error(f"S3 bucket check failed: {s3_message}")
+            logging.error("Aborting report generation.")
+            sys.exit(1)
+        logging.info("S3 connectivity verified.")
+        print(f"✓ S3 bucket verified: {S3_BUCKET_NAME}/{S3_FOLDER_PATH}\n")
+    else:
+        print("ℹ S3 upload disabled - saving locally only\n")
     
     # Calculate date range
     end_date = datetime.utcnow().date() - timedelta(days=1)  # Yesterday
@@ -71,6 +94,16 @@ def run_multi_day_reports(num_days=100):
                 status = "Success"
                 print(f"✓ Completed in {elapsed:.1f} seconds")
                 print(f"  Report saved: {report_path}")
+                
+                # Upload to S3 if enabled
+                if not SAVE_LOCALLY:
+                    print(f"  Uploading to S3...", end=" ")
+                    upload_success = upload_to_s3(report_path, S3_BUCKET_NAME, S3_FOLDER_PATH)
+                    if upload_success:
+                        print(f"✓ Uploaded to s3://{S3_BUCKET_NAME}/{S3_FOLDER_PATH}/")
+                    else:
+                        print(f"✗ Upload failed")
+                        error_msg = "S3 upload failed"
             else:
                 failed += 1
                 status = "No Data"

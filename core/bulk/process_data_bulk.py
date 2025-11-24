@@ -291,11 +291,11 @@ def generate_daily_report(target_date):
                     cached_contact = contact_cache[contact_id]
                     contact_lookup[contact_id] = {
                         "emailAddress": cached_contact.get("emailAddress", ""),
-                        "contact_country": cached_contact.get("contact_country", ""),
-                        "contact_hp_role": cached_contact.get("contact_hp_role", ""),
-                        "contact_hp_partner_id": cached_contact.get("contact_hp_partner_id", ""),
-                        "contact_partner_name": cached_contact.get("contact_partner_name", ""),
-                        "contact_market": cached_contact.get("contact_market", "")
+                        "contact_country": cached_contact.get("country", ""),
+                        "contact_hp_role": cached_contact.get("hp_role", ""),
+                        "contact_hp_partner_id": cached_contact.get("hp_partner_id", ""),
+                        "contact_partner_name": cached_contact.get("partner_name", ""),
+                        "contact_market": cached_contact.get("market", "")
                     }
                     contacts_added += 1
                 else:
@@ -318,11 +318,11 @@ def generate_daily_report(target_date):
                     for contact_id, contact_data in fetched_contacts.items():
                         contact_lookup[contact_id] = {
                             "emailAddress": contact_data.get("emailAddress", ""),
-                            "contact_country": contact_data.get("contact_country", ""),
-                            "contact_hp_role": contact_data.get("contact_hp_role", ""),
-                            "contact_hp_partner_id": contact_data.get("contact_hp_partner_id", ""),
-                            "contact_partner_name": contact_data.get("contact_partner_name", ""),
-                            "contact_market": contact_data.get("contact_market", "")
+                            "contact_country": contact_data.get("country", ""),
+                            "contact_hp_role": contact_data.get("hp_role", ""),
+                            "contact_hp_partner_id": contact_data.get("hp_partner_id", ""),
+                            "contact_partner_name": contact_data.get("partner_name", ""),
+                            "contact_market": contact_data.get("market", "")
                         }
                         
                         # Also add to cache for future use
@@ -457,7 +457,10 @@ def generate_daily_report(target_date):
     print(f"[PERF_DEBUG] Step 6: Skipped CONTACTS merge (data already included in sends).")
 
     # Temporarily disabled for faster testing
-    logger.info("Skipping HTML email download (disabled for testing).")
+    logger.info("Skipping HTML email download (disabled).")
+    # --- NEW STEP: Fetch Email HTML ---
+    # For each unique asset/email ID in df_sends, download the HTML content and save to disk.
+    # logger.info("Fetching HTML content for email assets...")
     # html_fetch_start = time.time()
     # if not df_sends.empty:
     #     # Get all unique, valid email asset IDs
@@ -542,6 +545,8 @@ def generate_daily_report(target_date):
     initial_count = len(df_sends)
     
     # Exclude @hp.com emails
+    # Convert to string first to avoid .str accessor errors
+    df_sends["emailAddress"] = df_sends["emailAddress"].astype(str)
     df_sends = df_sends[~df_sends["emailAddress"].str.lower().str.contains("@hp.com", na=False)]
     
     # Exclude specific test/spam email addresses from Eloqua Analytics filter
@@ -657,7 +662,7 @@ def generate_daily_report(target_date):
         "contact_hp_partner_id": "HP Partner Id",
         "contact_partner_name": "Partner Name",
         "contact_market": "Market",
-        "emailSendType": "Email Send Type"
+        # "emailSendType": "Email Send Type"  # Commented out - not displayed in reports
     }
     
     df_report = df_sends.rename(columns=final_column_map)
@@ -673,7 +678,8 @@ def generate_daily_report(target_date):
     # Format Email Send Date - it's already a datetime, just needs formatting
     if not df_report.empty and pd.api.types.is_datetime64_any_dtype(df_report["Email Send Date"]):
         df_report["Email Send Date"] = df_report["Email Send Date"].dt.strftime("%Y-%m-%d %I:%M:%S %p")
-    df_report["Email Address"] = df_report["Email Address"].str.lower()
+    # Convert to string first to avoid .str accessor errors
+    df_report["Email Address"] = df_report["Email Address"].astype(str).str.lower()
     print(f"[PERF_DEBUG] Step 8: Final column renaming and formatting in {time.time() - pd_step_start:.2f}s.")
     
     processing_end_time = time.time()
