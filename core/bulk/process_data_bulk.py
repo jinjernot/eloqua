@@ -625,13 +625,38 @@ def generate_daily_report(target_date):
     
     df_sends["Unique Opens"] = (df_sends["total_opens"] > 0).astype(int)
     df_sends["Unique Clicks"] = (df_sends["total_clicks"] > 0).astype(int)
-    df_sends["Hard Bounceback Rate"] = df_sends["hard"] * 100
-    df_sends["Soft Bounceback Rate"] = df_sends["soft"] * 100
-    df_sends["Bounceback Rate"] = df_sends["total_bb"] * 100
-    df_sends["Delivered Rate"] = df_sends["Total Delivered"] * 100
-    df_sends["Unique Open Rate"] = df_sends["Unique Opens"] * 100
-    df_sends["Clickthrough Rate"] = df_sends["total_clicks"] * 100 # This was original logic
-    df_sends["Unique Clickthrough Rate"] = df_sends["Unique Clicks"] * 100
+    
+    # For rate calculations, forwards should have 0 for all rates (no send = no rate)
+    is_forward = df_sends["emailSendType"].isin(["Forwarded", "EmailForward"])
+    
+    df_sends["Hard Bounceback Rate"] = df_sends.apply(
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["hard"] * 100,
+        axis=1
+    )
+    df_sends["Soft Bounceback Rate"] = df_sends.apply(
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["soft"] * 100,
+        axis=1
+    )
+    df_sends["Bounceback Rate"] = df_sends.apply(
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["total_bb"] * 100,
+        axis=1
+    )
+    df_sends["Delivered Rate"] = df_sends.apply(
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["Total Delivered"] * 100,
+        axis=1
+    )
+    df_sends["Unique Open Rate"] = df_sends.apply(
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["Unique Opens"] * 100,
+        axis=1
+    )
+    df_sends["Clickthrough Rate"] = df_sends.apply(
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["total_clicks"] * 100,
+        axis=1
+    )
+    df_sends["Unique Clickthrough Rate"] = df_sends.apply(
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["Unique Clicks"] * 100,
+        axis=1
+    )
     print(f"[PERF_DEBUG] Step 7: Final logic and calculations applied in {time.time() - pd_step_start:.2f}s.")
 
     pd_step_start = time.time()
