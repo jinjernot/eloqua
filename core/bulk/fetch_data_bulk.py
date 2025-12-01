@@ -33,11 +33,13 @@ def fetch_and_save_data(target_date=None):
 
     # For engagement (opens/clicks), look back 30 days BEFORE the target date
     # This captures forwards where someone opened an email that was sent earlier
-    # But only go UP TO the END of the target date (not into the future)
+    # Extend end date by +7 days to capture opens that happen up to a week after the send
+    # This accounts for timezone differences and delayed opens
     engagement_start_date = start - timedelta(days=30)
     engagement_start_str = engagement_start_date.strftime("%Y-%m-%dT00:00:00Z")
-    # Use the same end date as email sends (end of target date)
-    end_str_engagement = end_str
+    # Extend engagement window to +7 days after target date to capture late opens
+    engagement_end_date = start + timedelta(days=8)  # +8 because start+1 is already next day start
+    end_str_engagement = engagement_end_date.strftime("%Y-%m-%dT00:00:00Z")
 
     results = {}
     print(f"[PERF_DEBUG] Starting ThreadPoolExecutor for all 7 data fetches.")
