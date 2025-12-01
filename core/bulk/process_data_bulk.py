@@ -12,6 +12,27 @@ from core.rest.fetch_email_content import fetch_email_html
 
 logger = logging.getLogger(__name__)
 
+def clean_country_name(country):
+    """
+    Clean country names by removing 'HP ' prefix that appears in some Eloqua contact data.
+    Examples: 'HP US' -> 'USA', 'HP Canada' -> 'Canada', 'HP Colombia' -> 'Colombia'
+    """
+    if not country or not isinstance(country, str):
+        return country
+    
+    # Remove 'HP ' prefix
+    cleaned = country.strip()
+    if cleaned.startswith('HP '):
+        cleaned = cleaned[3:].strip()  # Remove 'HP ' (3 characters)
+    
+    # Normalize specific country codes
+    country_mappings = {
+        'US': 'USA',
+        'UK': 'United Kingdom',
+    }
+    
+    return country_mappings.get(cleaned, cleaned)
+
 def fetch_data_with_retries(fetch_function, max_retries=3):
     for attempt in range(max_retries):
         try:
@@ -108,7 +129,7 @@ def generate_daily_report(target_date):
             
             contact_lookup[cid] = {
                 "emailAddress": proper_cased_email,  # Use cached email (proper case) if available
-                "contact_country": send.get("contact_country", ""),
+                "contact_country": clean_country_name(send.get("contact_country", "")),
                 "contact_hp_role": send.get("contact_hp_role", ""),
                 "contact_hp_partner_id": send.get("contact_hp_partner_id", ""),
                 "contact_partner_name": send.get("contact_partner_name", ""),
@@ -291,7 +312,7 @@ def generate_daily_report(target_date):
                     cached_contact = contact_cache[contact_id]
                     contact_lookup[contact_id] = {
                         "emailAddress": cached_contact.get("emailAddress", ""),
-                        "contact_country": cached_contact.get("country", ""),
+                        "contact_country": clean_country_name(cached_contact.get("country", "")),
                         "contact_hp_role": cached_contact.get("hp_role", ""),
                         "contact_hp_partner_id": cached_contact.get("hp_partner_id", ""),
                         "contact_partner_name": cached_contact.get("partner_name", ""),
@@ -318,7 +339,7 @@ def generate_daily_report(target_date):
                     for contact_id, contact_data in fetched_contacts.items():
                         contact_lookup[contact_id] = {
                             "emailAddress": contact_data.get("emailAddress", ""),
-                            "contact_country": contact_data.get("country", ""),
+                            "contact_country": clean_country_name(contact_data.get("country", "")),
                             "contact_hp_role": contact_data.get("hp_role", ""),
                             "contact_hp_partner_id": contact_data.get("hp_partner_id", ""),
                             "contact_partner_name": contact_data.get("partner_name", ""),
@@ -342,6 +363,18 @@ def generate_daily_report(target_date):
         print(f"[FORWARD_LOOKUP_DEBUG] Total contacts in lookup now: {len(contact_lookup)}")
     
     if forward_contacts:
+        # Create mapping of campaign send dates for forwards
+        # Forwards should use the same send date as the actual campaign sends
+        campaign_send_dates = {}
+        for asset_id in campaigns_with_sends:
+            campaign_sends = df_sends[df_sends['assetId_str'] == asset_id]
+            if not campaign_sends.empty and 'activityDateParsed' in campaign_sends.columns:
+                # Use the first send date for this campaign
+                send_date = campaign_sends['activityDateParsed'].iloc[0]
+                campaign_send_dates[asset_id] = send_date
+        
+        print(f"[FORWARD_DEBUG] Campaign send dates collected for {len(campaign_send_dates)} campaigns")
+        
         # Pre-compute opens and clicks counts using groupby (much faster than row-by-row)
         # Use filtered dataframes that only include campaigns with sends on target date
         opens_counts = {}
@@ -404,6 +437,9 @@ def generate_daily_report(target_date):
                 forward_campaigns_created[asset_id] = 0
             forward_campaigns_created[asset_id] += 1
             
+            # Get the campaign send date for this forward
+            campaign_send_date = campaign_send_dates.get(asset_id)
+            
             forward_rows.append({
                 'assetId_str': asset_id,
                 'assetId_int': asset_id_int,  # Add this for Email Group mapping
@@ -417,6 +453,7 @@ def generate_daily_report(target_date):
                 'contact_partner_name': contact_info.get('contact_partner_name', ''),
                 'contact_market': contact_info.get('contact_market', ''),
                 'emailSendType': 'EmailForward',
+                'activityDateParsed': campaign_send_date,  # Use campaign's send date
                 'total_opens': opens_count,
                 'total_clicks': clicks_count,
                 'hard': 0,
