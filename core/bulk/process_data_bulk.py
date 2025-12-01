@@ -197,6 +197,12 @@ def generate_daily_report(target_date):
         bb_key = ["asset_id_str", "cid_str"]
         df_bb_counts = df_bb.groupby(bb_key)[['hard', 'soft', 'total_bb']].sum().reset_index()
         
+        # Cap bouncebacks at 1 per email/contact combination
+        # Eloqua can generate multiple BB records for retries, but logically it's 1 bounce per send
+        df_bb_counts['hard'] = df_bb_counts['hard'].clip(upper=1)
+        df_bb_counts['soft'] = df_bb_counts['soft'].clip(upper=1)
+        df_bb_counts['total_bb'] = df_bb_counts['total_bb'].clip(upper=1)
+        
         df_sends = df_sends.merge(df_bb_counts, left_on=["assetId_str", "contactId_str"], right_on=bb_key, how="left")
         print(f"[PERF_DEBUG] Step 3: BOUNCEBACKS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
     else:
