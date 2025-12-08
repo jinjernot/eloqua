@@ -12,6 +12,12 @@ from core.rest.fetch_email_content import fetch_email_html
 
 logger = logging.getLogger(__name__)
 
+# Campaigns to exclude from reports (test/internal campaigns)
+EXCLUDED_CAMPAIGN_IDS = {
+    '17056',  # HP OPEN HOUSE 2026 Donnerstag Nachmittag
+    '17076',  # HP OPEN HOUSE 2026 Freitag_Vormittag
+}
+
 def clean_country_name(country):
     """
     Clean country names by removing 'HP ' prefix that appears in some Eloqua contact data.
@@ -32,6 +38,13 @@ def clean_country_name(country):
     }
     
     return country_mappings.get(cleaned, cleaned)
+
+def should_exclude_campaign(campaign_id):
+    """
+    Check if a campaign should be excluded from the report.
+    Returns True if campaign should be excluded.
+    """
+    return str(campaign_id) in EXCLUDED_CAMPAIGN_IDS
 
 def fetch_data_with_retries(fetch_function, max_retries=3):
     for attempt in range(max_retries):
@@ -89,6 +102,10 @@ def generate_daily_report(target_date):
     if email_asset_data and len(email_asset_data) > 0:
         sample_fields = list(email_asset_data[0].keys())
         logger.info(f"Email asset data fields: {sample_fields}")
+    
+    # Filter out excluded campaigns from email_asset_data
+    email_asset_data = [item for item in email_asset_data if not should_exclude_campaign(item.get("emailID", ""))]
+    logger.info(f"Filtered out excluded campaigns, remaining: {len(email_asset_data)} email assets")
     
     email_group_map = {int(item["emailID"]): item.get("emailGroup", "") for item in email_asset_data if item.get("emailID")}
     email_name_map = {int(item["emailID"]): item.get("emailName", "") for item in email_asset_data if item.get("emailID")}
@@ -244,6 +261,16 @@ def generate_daily_report(target_date):
         df_sends["total_opens"] = 0
         df_opens = pd.DataFrame()
         print("[PERF_DEBUG] Step 5: Skipped OPENS (no data).")
+
+    # Filter out excluded campaigns from sends
+    pd_step_start = time.time()
+    df_sends['assetId_int'] = pd.to_numeric(df_sends['assetId'], errors='coerce')
+    initial_count = len(df_sends)
+    df_sends = df_sends[~df_sends['assetId_int'].astype(str).isin(EXCLUDED_CAMPAIGN_IDS)]
+    excluded_count = initial_count - len(df_sends)
+    if excluded_count > 0:
+        logger.info(f"Excluded {excluded_count} sends from filtered campaigns")
+    print(f"[PERF_DEBUG] Step 5.5: CAMPAIGN FILTERING completed in {time.time() - pd_step_start:.2f}s.")
 
     # Fill NaNs from merges with 0
     pd_step_start = time.time()
@@ -701,6 +728,25 @@ def generate_daily_report(target_date):
         axis=1
     )
     print(f"[PERF_DEBUG] Step 7: Final logic and calculations applied in {time.time() - pd_step_start:.2f}s.")
+
+    # Step 7b: Zero out opens/clicks for bounced emails (Total Delivered = 0)
+    # If an email bounced (not delivered), it's impossible to have opens or clicks
+    pd_step_start = time.time()
+    bounced_mask = (df_sends["Total Delivered"] == 0) & (df_sends["emailSendType"] == "EmailSend")
+    bounced_count = bounced_mask.sum()
+    
+    if bounced_count > 0:
+        # Zero out all engagement metrics for bounced emails
+        df_sends.loc[bounced_mask, "Unique Opens"] = 0
+        df_sends.loc[bounced_mask, "total_opens"] = 0
+        df_sends.loc[bounced_mask, "Unique Clicks"] = 0
+        df_sends.loc[bounced_mask, "total_clicks"] = 0
+        df_sends.loc[bounced_mask, "Unique Open Rate"] = 0
+        df_sends.loc[bounced_mask, "Clickthrough Rate"] = 0
+        df_sends.loc[bounced_mask, "Unique Clickthrough Rate"] = 0
+        
+        logger.info(f"Zeroed out engagement metrics for {bounced_count} bounced emails (Total Delivered = 0)")
+    print(f"[PERF_DEBUG] Step 7b: Bounced email engagement cleanup in {time.time() - pd_step_start:.2f}s.")
 
     pd_step_start = time.time()
     
