@@ -10,3 +10,5 @@ run_daily.py
 .venv
 email_downloads
 contact_cache.json.gz
+email_downloads_test1
+email_downloads

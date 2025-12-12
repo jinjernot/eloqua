@@ -729,24 +729,10 @@ def generate_daily_report(target_date):
     )
     print(f"[PERF_DEBUG] Step 7: Final logic and calculations applied in {time.time() - pd_step_start:.2f}s.")
 
-    # Step 7b: Zero out opens/clicks for bounced emails (Total Delivered = 0)
-    # If an email bounced (not delivered), it's impossible to have opens or clicks
-    pd_step_start = time.time()
-    bounced_mask = (df_sends["Total Delivered"] == 0) & (df_sends["emailSendType"] == "EmailSend")
-    bounced_count = bounced_mask.sum()
-    
-    if bounced_count > 0:
-        # Zero out all engagement metrics for bounced emails
-        df_sends.loc[bounced_mask, "Unique Opens"] = 0
-        df_sends.loc[bounced_mask, "total_opens"] = 0
-        df_sends.loc[bounced_mask, "Unique Clicks"] = 0
-        df_sends.loc[bounced_mask, "total_clicks"] = 0
-        df_sends.loc[bounced_mask, "Unique Open Rate"] = 0
-        df_sends.loc[bounced_mask, "Clickthrough Rate"] = 0
-        df_sends.loc[bounced_mask, "Unique Clickthrough Rate"] = 0
-        
-        logger.info(f"Zeroed out engagement metrics for {bounced_count} bounced emails (Total Delivered = 0)")
-    print(f"[PERF_DEBUG] Step 7b: Bounced email engagement cleanup in {time.time() - pd_step_start:.2f}s.")
+    # NOTE: Removed bounced email engagement cleanup (Step 7b)
+    # Reason: Bounced emails CAN have opens/clicks from forwards, which are valid engagement metrics
+    # Even if an email bounces, someone can forward it to the recipient who then opens/clicks it
+    # This matches Eloqua Analytics manual report behavior
 
     pd_step_start = time.time()
     

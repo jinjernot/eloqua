@@ -33,12 +33,13 @@ def fetch_and_save_data(target_date=None):
 
     # For engagement (opens/clicks), look back 30 days BEFORE the target date
     # This captures forwards where someone opened an email that was sent earlier
-    # Extend end date by +90 days to capture opens/forwards that happen up to 3 months after the send
+    # Extend end date by +180 days to capture opens/forwards that happen up to 6 months after the send
     # This accounts for timezone differences and delayed opens/forwards/clicks
+    # Extended from +90 to +180 days to capture engagement in Sep-Nov (96-164 days after June sends)
     engagement_start_date = start - timedelta(days=30)
     engagement_start_str = engagement_start_date.strftime("%Y-%m-%dT00:00:00Z")
-    # Extend engagement window to +90 days after target date to capture late opens/forwards/clicks
-    engagement_end_date = start + timedelta(days=91)  # +91 because start+1 is already next day start
+    # Extend engagement window to +180 days after target date to capture late opens/forwards/clicks
+    engagement_end_date = start + timedelta(days=181)  # +181 because start+1 is already next day start
     end_str_engagement = engagement_end_date.strftime("%Y-%m-%dT00:00:00Z")
 
     results = {}

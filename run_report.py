@@ -11,6 +11,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from core.bulk.process_data_bulk import generate_daily_report
 from config import SAVE_LOCALLY
+from auth import refresh_access_token
 
 # Conditionally import S3 utils only if needed
 if not SAVE_LOCALLY:
@@ -22,6 +23,14 @@ if not SAVE_LOCALLY:
         sys.exit(1)
 
 if __name__ == "__main__":
+    
+    # Refresh token before starting to avoid authentication issues
+    logging.info("Refreshing authentication token...")
+    refreshed_token = refresh_access_token()
+    if not refreshed_token:
+        logging.error("Failed to refresh access token. Please run auth.py to re-authenticate.")
+        sys.exit(1)
+    logging.info("Authentication token refreshed successfully.")
     
     # Check S3 connectivity if upload is enabled
     if not SAVE_LOCALLY:
