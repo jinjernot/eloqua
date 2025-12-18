@@ -24,15 +24,21 @@ def fetch_data(endpoint, filename, extra_params=None):
 
     full_data = {"value": []}
     url = endpoint
+    page_count = 0
 
     while url:
-        response = requests.get(url, headers=headers, params=params if url == endpoint else None)
+        page_count += 1
+        response = requests.get(url, headers=headers, params=params if url == endpoint else None, timeout=60)
 
         if response.status_code != 200:
             return {"error": "Failed to fetch data", "details": response.text}
 
         data = response.json()
+        items_in_page = len(data.get("value", []))
         full_data["value"].extend(data.get("value", []))
+        
+        if page_count % 5 == 0:  # Log progress every 5 pages
+            print(f"  [{filename}] Fetched page {page_count}, total records: {len(full_data['value'])}")
         
         url = data.get("@odata.nextLink")
         params = None

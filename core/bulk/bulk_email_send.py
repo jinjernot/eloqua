@@ -59,28 +59,36 @@ def fetch_activity_export(activity_type, start_date, end_date, headers, activity
     save_debug_payload(export_payload, f"{activity_type.lower()}_export_payload_{start_date[:10]}.json")
 
     # Step 1: Create export
-    export_resp = requests.post(BULK_ACTIVITY_EXPORT_URL, headers=headers, json=export_payload)
+    logging.info(f"Creating {activity_type} export definition...")
+    export_resp = requests.post(BULK_ACTIVITY_EXPORT_URL, headers=headers, json=export_payload, timeout=30)
     export_resp.raise_for_status()
     export_uri = export_resp.json().get("uri")
-    logging.info(f"Created {activity_type} export: {export_uri}")
+    logging.info(f"✓ Created {activity_type} export: {export_uri}")
 
     # Step 2: Start sync
-    sync_resp = requests.post(BULK_SYNC_URL, headers=headers, json={"syncedInstanceUri": export_uri})
+    logging.info(f"Starting sync for {activity_type}...")
+    sync_resp = requests.post(BULK_SYNC_URL, headers=headers, json={"syncedInstanceUri": export_uri}, timeout=30)
     sync_resp.raise_for_status()
     sync_uri = sync_resp.json().get("uri")
-    logging.info(f"Started sync for {activity_type}: {sync_uri}")
+    logging.info(f"✓ Sync started for {activity_type}: {sync_uri}")
 
     # Step 3: Poll sync
+    logging.info(f"Polling sync status for {activity_type} (max {SYNC_MAX_ATTEMPTS * SYNC_WAIT_SECONDS}s)...")
     for attempt in range(SYNC_MAX_ATTEMPTS):
         time.sleep(SYNC_WAIT_SECONDS)
         poll_url = f"{BULK_SYNC_URL}/{sync_uri.split('/')[-1]}"
-        poll_resp = requests.get(poll_url, headers=headers)
+        poll_resp = requests.get(poll_url, headers=headers, timeout=30)
         poll_resp.raise_for_status()
-        if poll_resp.json().get("status") == "success":
-            logging.info(f"Sync completed for {activity_type}.")
+        sync_status = poll_resp.json().get("status")
+        logging.info(f"  [{attempt+1}/{SYNC_MAX_ATTEMPTS}] Sync status: {sync_status}")
+        if sync_status == "success":
+            logging.info(f"✓ Sync completed for {activity_type}")
             break
+        elif sync_status == "error":
+            logging.error(f"✗ Sync failed for {activity_type}")
+            return []
     else:
-        logging.error(f"Sync did not complete in expected time for {activity_type}.")
+        logging.error(f"✗ Sync timeout after {SYNC_MAX_ATTEMPTS * SYNC_WAIT_SECONDS}s for {activity_type}")
         return []
 
     # Step 4: Download all data with pagination
@@ -95,11 +103,13 @@ def fetch_activity_export(activity_type, start_date, end_date, headers, activity
 
     all_items = []
     offset = 0
-    limit = 5000 
+    limit = 5000
+    
+    logging.info(f"Downloading {activity_type} data...")
 
     while True:
         paged_url = f"{base_data_url}?offset={offset}&limit={limit}"
-        data_resp = requests.get(paged_url, headers=download_headers)
+        data_resp = requests.get(paged_url, headers=download_headers, timeout=60)
         if data_resp.status_code != 200:
             logging.error(f"Failed to fetch data at offset {offset} for {activity_type}: {data_resp.text}")
             break
@@ -108,6 +118,7 @@ def fetch_activity_export(activity_type, start_date, end_date, headers, activity
             data = data_resp.json()
             items = data.get("items", [])
             all_items.extend(items)
+            logging.info(f"  Downloaded {len(all_items)} records so far...")
 
             if not data.get("hasMore"): 
                 break
