@@ -696,35 +696,49 @@ def generate_daily_report(target_date):
     df_sends["Unique Opens"] = (df_sends["total_opens"] > 0).astype(int)
     df_sends["Unique Clicks"] = (df_sends["total_clicks"] > 0).astype(int)
     
-    # For rate calculations, forwards should have 0 for all rates (no send = no rate)
-    is_forward = df_sends["emailSendType"].isin(["Forwarded", "EmailForward"])
+    # Rate calculations per Oracle Eloqua documentation:
+    # - Bounceback rates: Metric / Total Sends * 100
+    # - Other rates (Open, Click, Delivered): Metric / Total Delivered * 100
+    # - Forwards have 0 for all rates (no send = no rate)
     
+    # Bounceback rates use Total Sends as denominator
     df_sends["Hard Bounceback Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["hard"] * 100,
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Sends"] == 0 
+                    else (row["hard"] / row["Total Sends"]) * 100,
         axis=1
     )
     df_sends["Soft Bounceback Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["soft"] * 100,
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Sends"] == 0
+                    else (row["soft"] / row["Total Sends"]) * 100,
         axis=1
     )
     df_sends["Bounceback Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["total_bb"] * 100,
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Sends"] == 0
+                    else (row["total_bb"] / row["Total Sends"]) * 100,
         axis=1
     )
+    
+    # Delivered Rate uses Total Sends as denominator: (Total Sends - Total Bouncebacks) / Total Sends
     df_sends["Delivered Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["Total Delivered"] * 100,
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Sends"] == 0
+                    else (row["Total Delivered"] / row["Total Sends"]) * 100,
         axis=1
     )
+    
+    # Open and Click rates use Total Delivered as denominator (per Oracle documentation)
     df_sends["Unique Open Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["Unique Opens"] * 100,
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Delivered"] == 0
+                    else (row["Unique Opens"] / row["Total Delivered"]) * 100,
         axis=1
     )
     df_sends["Clickthrough Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["total_clicks"] * 100,
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Delivered"] == 0
+                    else (row["total_clicks"] / row["Total Delivered"]) * 100,
         axis=1
     )
     df_sends["Unique Clickthrough Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else row["Unique Clicks"] * 100,
+        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Delivered"] == 0
+                    else (row["Unique Clicks"] / row["Total Delivered"]) * 100,
         axis=1
     )
     print(f"[PERF_DEBUG] Step 7: Final logic and calculations applied in {time.time() - pd_step_start:.2f}s.")
