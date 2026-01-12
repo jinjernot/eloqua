@@ -4,7 +4,7 @@ import time
 import logging
 import os
 import json
-from auth import get_valid_access_token
+from core.aws.auth import get_valid_access_token
 from core.utils import save_json
 from config import *
 
@@ -112,11 +112,11 @@ def fetch_contacts_bulk(contact_ids, batch_index=None):
             "Accept": "application/json"
         }
         
-        for attempt in range(3):
+        for attempt in range(API_RETRY_ATTEMPTS):
             data_resp = requests.get(data_url, headers=download_headers)
             if not data_resp.text.strip():
                 logging.warning("Attempt %d: Empty response, retrying...", attempt + 1)
-                time.sleep(2)
+                time.sleep(API_RETRY_DELAY)
                 continue
 
             try:
@@ -139,7 +139,7 @@ def fetch_contacts_bulk(contact_ids, batch_index=None):
                         f.write(data_resp.text)
                     logging.info("Saved HTML debug to: %s", html_debug_file)
 
-                time.sleep(2)
+                time.sleep(API_RETRY_DELAY)
 
         logging.error("All attempts failed for batch %s", batch_index)
         return []
@@ -188,7 +188,7 @@ def batch_fetch_contacts_bulk(contact_ids, max_workers=20):
 
             filtered = [
                 contact for contact in batch_result
-                if not contact.get("emailAddress", "").lower().endswith("@hp.com")
+                if not contact.get("emailAddress", "").lower().endswith(EXCLUDE_EMAIL_DOMAIN)
             ]
 
             with lock:

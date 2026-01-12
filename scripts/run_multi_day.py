@@ -3,11 +3,16 @@ Run daily reports for multiple consecutive days.
 Useful for backfilling historical data and testing cache performance.
 """
 import sys
+import os
 import csv
 import traceback
 from datetime import datetime, timedelta
+
+# Add parent directory to path to import core and config modules
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from core.bulk.process_data_bulk import generate_daily_report
-from config import SAVE_LOCALLY
+from config import SAVE_LOCALLY, WEEKLY_REPORTS_DIR
 import logging
 
 # Conditionally import S3 utils
@@ -62,7 +67,7 @@ def run_multi_day_reports(num_days=100):
     total_time = 0
     
     # Prepare timing log file
-    timing_log_file = f"data/report_timing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    timing_log_file = f"{WEEKLY_REPORTS_DIR}/report_timing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     with open(timing_log_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['Report Number', 'Date', 'Status', 'Time (seconds)', 'Report Path', 'Error Message'])
@@ -84,7 +89,13 @@ def run_multi_day_reports(num_days=100):
         
         try:
             start_time = datetime.now()
-            report_path = generate_daily_report(date_str)
+            result = generate_daily_report(date_str)
+            
+            # Handle both old (single value) and new (tuple) return formats
+            if isinstance(result, tuple):
+                report_path, _ = result  # Ignore forward count in this script
+            else:
+                report_path = result
             elapsed = (datetime.now() - start_time).total_seconds()
             
             total_time += elapsed

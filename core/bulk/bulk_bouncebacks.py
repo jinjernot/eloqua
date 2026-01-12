@@ -3,7 +3,7 @@ import logging
 import time
 import os
 import json
-from auth import get_valid_access_token
+from core.aws.auth import get_valid_access_token
 from core.utils import save_json
 from config import *
 
@@ -40,23 +40,7 @@ def fetch_bouncebacks_bulk(start_date, end_date):
 
         export_payload = {
             "name": f"Bulk_Bounceback_{start_date[:10]}",
-            "fields": {
-                "ActivityId": "{{Activity.Id}}",
-                "ActivityType": "{{Activity.Type}}",
-                "ActivityDate": "{{Activity.CreatedAt}}",
-                "EmailAddress": "{{Activity.Field(EmailAddress)}}",
-                "ContactId": "{{Activity.Contact.Id}}",
-                "AssetType": "{{Activity.Asset.Type}}",
-                "AssetName": "{{Activity.Asset.Name}}",
-                "AssetId": "{{Activity.Asset.Id}}",
-                "CampaignId": "{{Activity.Campaign.Id}}",
-                "ExternalId": "{{Activity.ExternalId}}",
-                "EmailRecipientId": "{{Activity.Field(EmailRecipientId)}}",
-                "DeploymentId": "{{Activity.Field(EmailDeploymentId)}}",
-                "SmtpErrorCode": "{{Activity.Field(SmtpErrorCode)}}",
-                "SmtpStatusCode": "{{Activity.Field(SmtpStatusCode)}}",
-                "SmtpMessage": "{{Activity.Field(SmtpMessage)}}"
-            },
+            "fields": BOUNCEBACK_FIELDS,
             "filter": date_filter 
         }
 

@@ -5,48 +5,12 @@ import json
 import gzip
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from auth import get_valid_access_token
+from core.aws.auth import get_valid_access_token
 from config import *
 from core.utils import save_json
 
 DATA_DIR = "data"
-CONTACT_CACHE_FILE = "data/contact_cache.json.gz"  # Now compressed
-
-def fetch_data(endpoint, filename, extra_params=None):
-    access_token = get_valid_access_token()
-    if not access_token:
-        return {"error": "Authorization required. Please re-authenticate."}
-
-    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
-    params = {"depth": "complete"}
-    if extra_params:
-        params.update(extra_params)
-
-    full_data = {"value": []}
-    url = endpoint
-    page_count = 0
-
-    while url:
-        page_count += 1
-        response = requests.get(url, headers=headers, params=params if url == endpoint else None, timeout=60)
-
-        if response.status_code != 200:
-            return {"error": "Failed to fetch data", "details": response.text}
-
-        data = response.json()
-        items_in_page = len(data.get("value", []))
-        full_data["value"].extend(data.get("value", []))
-        
-        if page_count % 5 == 0:  # Log progress every 5 pages
-            print(f"  [{filename}] Fetched page {page_count}, total records: {len(full_data['value'])}")
-        
-        url = data.get("@odata.nextLink")
-        params = None
-
-    filepath = os.path.join(DATA_DIR, filename)
-    save_json(full_data, filepath)
-    return full_data
-
+# CONTACT_CACHE_FILE is now imported from config
 
 def load_contact_cache():
     """
@@ -68,7 +32,7 @@ def load_contact_cache():
             print(f"[CACHE] Warning: Could not load compressed cache: {e}")
             
     # Fallback: try loading old uncompressed cache
-    old_cache_path = Path("data/contact_cache.json")
+    old_cache_path = Path("data/cache/contact_cache.json")
     if old_cache_path.exists():
         try:
             with open(old_cache_path, 'r', encoding='utf-8') as f:
@@ -76,7 +40,7 @@ def load_contact_cache():
                 print(f"[CACHE] Loaded {len(cache)} contacts from old uncompressed cache")
                 print(f"[CACHE] Converting to compressed format...")
                 save_contact_cache(cache)  # Save in new compressed format
-                print(f"[CACHE] Old cache backed up, you can delete data/contact_cache.json")
+                print(f"[CACHE] Migration complete. Old file can be deleted.")
                 return cache
         except Exception as e:
             print(f"[CACHE] Warning: Could not load old cache: {e}")
@@ -109,7 +73,7 @@ def save_contact_cache(cache):
     
     # Save uncompressed version (backup)
     try:
-        backup_path = Path("data/contact_cache.json")
+        backup_path = Path("data/cache/contact_cache.json")
         with open(backup_path, 'w', encoding='utf-8') as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
         
@@ -142,18 +106,6 @@ def fetch_contact_by_id(contact_id):
                 "partner_name": "",
                 "market": ""
             }
-            
-            # Debug: Print first contact's fields to understand structure (only once)
-            import os
-            debug_file = "data/contact_fields_debug.txt"
-            if not os.path.exists(debug_file):
-                with open(debug_file, "w") as f:
-                    f.write(f"Contact ID: {contact_id}\n")
-                    f.write(f"Email: {data.get('emailAddress', 'N/A')}\n\n")
-                    f.write("Available field values:\n")
-                    for field in data.get("fieldValues", []):
-                        if field.get("value"):
-                            f.write(f"  ID: {field.get('id', '')}, Name: {field.get('name', '')}, Value: {field.get('value', '')}\n")
             
             # Parse field values from the contact - map by field ID
             # Confirmed field IDs from Eloqua instance:
@@ -229,10 +181,10 @@ def fetch_contacts_batch(contact_ids, max_workers=5, use_cache=True):
         print(f"[CACHE] All contacts found in cache, no API calls needed!")
         return contacts
     
-    print(f"[API] Fetching {to_fetch_count} new contacts via API (this may take {to_fetch_count * 0.2 / 60:.1f} minutes)...")
+    print(f"[API] Fetching {to_fetch_count} new contacts via API (this may take {to_fetch_count * REST_API_RATE_LIMIT_DELAY / 60:.1f} minutes)...")
     
     def fetch_with_delay(contact_id):
-        time.sleep(0.2)  # Rate limiting: 5 requests per second
+        time.sleep(REST_API_RATE_LIMIT_DELAY)  # Rate limiting from config
         result = fetch_contact_by_id(contact_id)
         return contact_id, result
     
@@ -264,3 +216,59 @@ def fetch_contacts_batch(contact_ids, max_workers=5, use_cache=True):
         save_contact_cache(cache)
     
     return contacts
+
+
+def fetch_data(endpoint, filename, extra_params=None):
+    """
+    Fetch data from Eloqua OData endpoint.
+    
+    Args:
+        endpoint: The OData endpoint URL
+        filename: Filename for saving (not used anymore, kept for compatibility)
+        extra_params: Optional dict of additional query parameters (e.g., $filter)
+    
+    Returns:
+        Dictionary with API response data
+    """
+    access_token = get_valid_access_token()
+    if not access_token:
+        return {}
+
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    
+    # Build parameters
+    params = {"count": 5000}
+    if extra_params:
+        params.update(extra_params)
+    
+    all_data = []
+    page = 1
+    
+    while True:
+        params["page"] = page
+        try:
+            response = requests.get(endpoint, headers=headers, params=params, timeout=60)
+            response.raise_for_status()
+            
+            data = response.json()
+            elements = data.get("value", [])
+            
+            if not elements:
+                break
+                
+            all_data.extend(elements)
+            print(f"[INFO] Fetched page {page} from {endpoint.split('/')[-1]}: {len(elements)} records")
+            
+            # Check if there are more pages
+            total = data.get("total", 0)
+            if len(all_data) >= total:
+                break
+                
+            page += 1
+            time.sleep(REST_API_RATE_LIMIT_DELAY)  # Rate limiting from config
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch data from {endpoint}: {e}")
+            break
+    
+    return {"value": all_data}

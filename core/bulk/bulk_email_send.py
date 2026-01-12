@@ -3,7 +3,7 @@ import logging
 import time
 import os
 import json
-from auth import get_valid_access_token
+from core.aws.auth import get_valid_access_token
 from core.utils import save_json
 from config import *
 
@@ -40,9 +40,9 @@ def fetch_activity_export(activity_type, start_date, end_date, headers, activity
         "contactId": "{{Activity.Contact.Id}}",
         "emailAddress": "{{Activity.Field(EmailAddress)}}", 
         "subjectLine": "{{Activity.Field(SubjectLine)}}",
-        "emailSendType": "{{Activity.Type}}",  # Store the activity type itself
-        "deploymentId": "{{Activity.Field(EmailDeploymentId)}}",  # Deployment information
-        "externalId": "{{Activity.ExternalId}}",  # External ID might indicate forwards
+        "emailSendType": "{{Activity.Type}}",
+        "deploymentId": "{{Activity.Field(EmailDeploymentId)}}",
+        "externalId": "{{Activity.ExternalId}}",
         "contact_country": "{{Activity.Contact.Field(C_Country)}}",
         "contact_hp_role": "{{Activity.Contact.Field(C_HP_Role1)}}",
         "contact_hp_partner_id": "{{Activity.Contact.Field(C_HP_PartnerID1)}}",

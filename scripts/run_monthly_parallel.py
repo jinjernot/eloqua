@@ -4,16 +4,32 @@ Optimized for long-running production workloads with better error handling,
 progress tracking, and configurable parameters.
 """
 import sys
+import os
 import csv
 import traceback
 import time
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Add parent directory to path to import core and config modules
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from core.bulk.process_data_bulk import generate_daily_report
-from config import SAVE_LOCALLY
+from config import SAVE_LOCALLY, MONTHLY_REPORTS_DIR, DEFAULT_MAX_WORKERS, MAX_WORKERS_LIMIT
 import logging
 import threading
 import signal
+from core.logging_config import setup_thread_safe_logging
+
+# Setup logging with file output
+setup_thread_safe_logging("run_monthly_parallel")
+
+# Automatically authenticate to AWS if needed
+if not SAVE_LOCALLY:
+    from core.aws.auto_authenticate import ensure_authenticated
+    if not ensure_authenticated(auto_refresh=True, use_poetry=True):
+        print("\n✗ Unable to authenticate to AWS. Exiting.\n")
+        sys.exit(1)
 
 # Conditionally import S3 utils
 if not SAVE_LOCALLY:
@@ -23,12 +39,6 @@ if not SAVE_LOCALLY:
     except ImportError:
         logging.error("boto3 not installed. Install with: pip install boto3")
         sys.exit(1)
-
-# Setup logging with thread-safe handler
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(threadName)s - %(levelname)s - %(message)s'
-)
 
 # Thread-safe print lock
 print_lock = threading.Lock()
@@ -81,7 +91,14 @@ def process_single_date(date_obj, report_num, total_reports):
     try:
         start_time = time.time()
         
-        report_path = generate_daily_report(date_str)
+        result = generate_daily_report(date_str)
+        
+        # Handle both old (single value) and new (tuple) return formats
+        if isinstance(result, tuple):
+            report_path, forwards_count = result
+        else:
+            report_path = result
+            forwards_count = 0
         
         elapsed = time.time() - start_time
         
@@ -91,40 +108,47 @@ def process_single_date(date_obj, report_num, total_reports):
             # Extract metrics from the generated file
             try:
                 import pandas as pd
-                df = pd.read_csv(report_path)
+                # Handle BOM and encoding issues
+                df = pd.read_csv(report_path, sep='\t', encoding='utf-16', on_bad_lines='skip')
                 total_records = len(df)
                 
                 # Extract volume metrics if columns exist
-                if 'Email Type' in df.columns:
-                    email_sends_count = len(df[df['Email Type'].str.lower().str.contains('send', na=False)])
-                    forwards_count = len(df[df['Email Type'].str.lower().str.contains('forward', na=False)])
+                if 'Total Sends' in df.columns:
+                    email_sends_count = df['Total Sends'].sum()
                 
-                if 'Bounced' in df.columns:
-                    bouncebacks_count = df['Bounced'].sum() if pd.api.types.is_numeric_dtype(df['Bounced']) else len(df[df['Bounced'] == 'Yes'])
+                if 'Total Bouncebacks' in df.columns:
+                    bouncebacks_count = df['Total Bouncebacks'].sum()
                 
-                if 'Clicked' in df.columns:
-                    clicks_count = df['Clicked'].sum() if pd.api.types.is_numeric_dtype(df['Clicked']) else len(df[df['Clicked'] == 'Yes'])
+                if 'Unique Clickthrough Rate' in df.columns or 'Clickthrough Rate' in df.columns:
+                    # Count rows with clicks (non-zero clickthrough rate)
+                    click_col = 'Unique Clickthrough Rate' if 'Unique Clickthrough Rate' in df.columns else 'Clickthrough Rate'
+                    clicks_count = len(df[df[click_col] > 0])
                 
-                if 'Opened' in df.columns:
-                    opens_count = df['Opened'].sum() if pd.api.types.is_numeric_dtype(df['Opened']) else len(df[df['Opened'] == 'Yes'])
+                if 'Unique Opens' in df.columns:
+                    opens_count = len(df[df['Unique Opens'] > 0])
+                
+                # forwards_count is already set from generate_daily_report return value
                 
             except Exception as read_error:
                 logging.warning(f"Could not read metrics from report file: {read_error}")
             
             safe_print(f"✓ [{report_num}/{total_reports}] {date_str} completed in {elapsed:.1f}s - {total_records:,} records")
             
-            # Upload to S3 if enabled
+            # Upload to S3 if enabled (skip empty files with only headers)
             if not SAVE_LOCALLY and not shutdown_flag.is_set():
-                try:
-                    upload_success = upload_to_s3(report_path, S3_BUCKET_NAME, S3_FOLDER_PATH)
-                    if upload_success:
-                        safe_print(f"  ✓ Uploaded to S3")
-                    else:
-                        safe_print(f"  ✗ S3 upload failed")
-                        error_msg = "S3 upload failed"
-                except Exception as upload_error:
-                    safe_print(f"  ✗ S3 upload error: {upload_error}")
-                    error_msg = f"S3 upload error: {upload_error}"
+                if total_records > 0:
+                    try:
+                        upload_success = upload_to_s3(report_path, S3_BUCKET_NAME, S3_FOLDER_PATH)
+                        if upload_success:
+                            safe_print(f"  ✓ Uploaded to S3")
+                        else:
+                            safe_print(f"  ✗ S3 upload failed")
+                            error_msg = "S3 upload failed"
+                    except Exception as upload_error:
+                        safe_print(f"  ✗ S3 upload error: {upload_error}")
+                        error_msg = f"S3 upload error: {upload_error}"
+                else:
+                    safe_print(f"  ⊘ Skipped S3 upload (empty file)")
         else:
             status = "No Data"
             error_msg = "No email sends found for this date"
@@ -151,14 +175,16 @@ def process_single_date(date_obj, report_num, total_reports):
         'error_msg': error_msg
     }
 
-def run_monthly_reports_parallel(num_days=30, max_workers=3):
+def run_monthly_reports_parallel(num_days=30, max_workers=None):
     """
     Generate reports for the specified number of days using parallel processing.
     
     Args:
         num_days: Number of days to generate reports for (default 30 for ~1 month)
-        max_workers: Number of parallel workers (default 3, recommended 2-4)
+        max_workers: Number of parallel workers (default from config, recommended 2-4)
     """
+    if max_workers is None:
+        max_workers = DEFAULT_MAX_WORKERS
     print(f"\n{'='*80}")
     print(f"  MONTHLY REPORT GENERATION - PRODUCTION PARALLEL MODE")
     print(f"  Processing {num_days} days with {max_workers} parallel workers")
@@ -188,7 +214,7 @@ def run_monthly_reports_parallel(num_days=30, max_workers=3):
     
     # Prepare metrics file
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    metrics_file = f"data/monthly_report_metrics_{timestamp}.csv"
+    metrics_file = f"{MONTHLY_REPORTS_DIR}/monthly_report_metrics_{timestamp}.csv"
     
     with open(metrics_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
@@ -374,13 +400,14 @@ if __name__ == "__main__":
     if len(sys.argv) > 2:
         try:
             max_workers = int(sys.argv[2])
-            if max_workers < 1 or max_workers > 10:
-                print("Warning: max_workers should be between 1 and 10")
-                print("Using default: 3")
-                max_workers = 3
+            if max_workers < 1 or max_workers > MAX_WORKERS_LIMIT:
+                print(f"Warning: max_workers should be between 1 and {MAX_WORKERS_LIMIT}")
+                print(f"Using default: {DEFAULT_MAX_WORKERS}")
+                max_workers = DEFAULT_MAX_WORKERS
         except ValueError:
             print(f"Invalid max_workers: {sys.argv[2]}")
-            print("Using default: 3")
+            print(f"Using default: {DEFAULT_MAX_WORKERS}")
+            max_workers = DEFAULT_MAX_WORKERS
     
     print(f"Configuration: {num_days} days, {max_workers} workers")
     

@@ -3,11 +3,19 @@ Run daily reports for the past week with detailed performance metrics.
 Tracks timing and volume for each processing step to identify bottlenecks.
 """
 import sys
+import os
 import csv
 import traceback
 import time
 from datetime import datetime, timedelta
+
+# Add parent directory to path to import core and config modules
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import WEEKLY_REPORTS_DIR
+
 from core.bulk.process_data_bulk import generate_daily_report
+from core.aws.auto_authenticate import ensure_authenticated
 from config import SAVE_LOCALLY
 import logging
 
@@ -38,6 +46,15 @@ def run_weekly_reports_with_metrics():
     print(f"  Generating reports for the last {num_days} days")
     print(f"{'='*80}\n")
     
+    # Ensure AWS credentials are fresh before checking S3
+    if not SAVE_LOCALLY:
+        logging.info("Ensuring AWS credentials are authenticated...")
+        if not ensure_authenticated():
+            logging.error("Failed to authenticate AWS credentials.")
+            logging.error("Aborting report generation.")
+            sys.exit(1)
+        logging.info("AWS credentials verified.")
+    
     # Check S3 connectivity if upload is enabled
     if not SAVE_LOCALLY:
         logging.info("S3 upload is enabled. Checking S3 connectivity...")
@@ -66,7 +83,7 @@ def run_weekly_reports_with_metrics():
     
     # Prepare detailed metrics log file
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    metrics_file = f"data/weekly_report_metrics_{timestamp}.csv"
+    metrics_file = f"{WEEKLY_REPORTS_DIR}/weekly_report_metrics_{timestamp}.csv"
     
     with open(metrics_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
@@ -117,7 +134,13 @@ def run_weekly_reports_with_metrics():
             # Hook into the logging to capture metrics
             # Note: This is a simplified approach - for full metrics we'd need to modify
             # the generate_daily_report function to return metrics
-            report_path = generate_daily_report(date_str)
+            result = generate_daily_report(date_str)
+            
+            # Handle both old (single value) and new (tuple) return formats
+            if isinstance(result, tuple):
+                report_path, _ = result  # Ignore forward count in this script
+            else:
+                report_path = result
             
             elapsed = time.time() - start_time
             total_time += elapsed
@@ -144,7 +167,7 @@ def run_weekly_reports_with_metrics():
                         clicks_count = df['Clicked'].sum() if pd.api.types.is_numeric_dtype(df['Clicked']) else len(df[df['Clicked'] == 'Yes'])
                     
                     if 'Opened' in df.columns:
-                        opens_count = df['Opened'].sum() if pd.api.types.is_numeric_dtype(df['Opened']) else len(df[df['Opened'] == 'Yes'])
+                        opens_count = len(df[df['Opened'] > 0]) if pd.api.types.is_numeric_dtype(df['Opened']) else len(df[df['Opened'] == 'Yes'])
                     
                 except Exception as read_error:
                     logging.warning(f"Could not read metrics from report file: {read_error}")

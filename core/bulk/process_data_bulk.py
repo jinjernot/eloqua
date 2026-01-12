@@ -7,8 +7,9 @@ import csv
 import os
 from core.bulk.fetch_data_bulk import fetch_and_save_data
 from core.rest.fetch_data import fetch_contacts_batch, save_contact_cache
-
-from core.rest.fetch_email_content import fetch_email_html 
+from core.rest.fetch_email_content import fetch_email_html
+from config import EXCLUDE_EMAIL_DOMAIN, EXCLUDE_TEST_EMAILS, DAILY_REPORTS_DIR, LOGS_DIR, REST_API_RATE_LIMIT_DELAY 
+from config import VERBOSE_DEBUG
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,11 @@ EXCLUDED_CAMPAIGN_IDS = {
     '17056',  # HP OPEN HOUSE 2026 Donnerstag Nachmittag
     '17076',  # HP OPEN HOUSE 2026 Freitag_Vormittag
 }
+
+def debug_print(message):
+    """Print debug messages only if VERBOSE_DEBUG is enabled"""
+    if VERBOSE_DEBUG:
+        print(message)
 
 def clean_country_name(country):
     """
@@ -46,19 +52,6 @@ def should_exclude_campaign(campaign_id):
     """
     return str(campaign_id) in EXCLUDED_CAMPAIGN_IDS
 
-def fetch_data_with_retries(fetch_function, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            print(f"[PERF_DEBUG] Calling fetch_and_save_data (attempt {attempt+1})...")
-            return fetch_function()
-        except requests.exceptions.ConnectionError as e:
-            logger.warning("Connection error: %s. Retrying %d/%d...", e, attempt + 1, max_retries)
-            time.sleep(2 ** attempt)
-        except requests.exceptions.RequestException as e:
-            logger.error("Request failed: %s", e)
-            break
-    return None
-
 def sanitize_dataframe_for_csv(df):
     """
     Applies sanitization rules directly to a pandas DataFrame before saving.
@@ -74,12 +67,12 @@ def generate_daily_report(target_date):
     start_time = time.time()
     logger.info("Starting daily report generation for %s", target_date)
 
-    data = fetch_data_with_retries(lambda: fetch_and_save_data(target_date))
+    data = fetch_and_save_data(target_date)
     if not data:
-        logger.error("Failed to fetch data after retries.")
+        logger.error("Failed to fetch data.")
         return None
     
-    print("[PERF_DEBUG] Data fetch complete. Starting pandas processing...")
+    debug_print(f"[PERF_DEBUG] Data fetch complete. Starting pandas processing...")
 
     target_date_obj = parser.parse(target_date).date()
     email_sends = data.get("email_sends", [])
@@ -141,7 +134,7 @@ def generate_daily_report(target_date):
             
             # Debug: Print first 3 cases where we restored case
             if debug_sample_count < 3 and proper_cased_email != bulk_email:
-                print(f"[DEBUG] Contact {cid}: Bulk='{bulk_email}' → Cache='{proper_cased_email}'")
+                debug_print(f"[DEBUG] Contact {cid}: Bulk='{bulk_email}' → Cache='{proper_cased_email}'")
                 debug_sample_count += 1
             
             contact_lookup[cid] = {
@@ -153,7 +146,7 @@ def generate_daily_report(target_date):
                 "contact_market": send.get("contact_market", "")
             }
     
-    print(f"[PERF_DEBUG] Step 1: Helper maps created ({len(contact_lookup)} contacts) in {time.time() - pd_step_start:.2f}s.")
+    debug_print(f"[PERF_DEBUG] Step 1: Helper maps created ({len(contact_lookup)} contacts) in {time.time() - pd_step_start:.2f}s.")
 
     # 2. Load SENDS DataFrame
     pd_step_start = time.time()
@@ -162,8 +155,14 @@ def generate_daily_report(target_date):
         logger.warning("No email sends found. Aborting report.")
         return None
 
+    # Filter out sends without campaignId (non-standard eComm data)
+    email_sends_filtered = [s for s in email_sends if s.get("campaignId")]
+    excluded_no_campaign = len(email_sends) - len(email_sends_filtered)
+    if excluded_no_campaign > 0:
+        logger.info(f"Excluded {excluded_no_campaign} sends without campaignId (non-standard eComm data)")
+    
     unique_sends_dict = {}
-    for s in email_sends:
+    for s in email_sends_filtered:
         key = (
             str(s.get("assetId")), 
             str(s.get("contactId")),
@@ -198,7 +197,7 @@ def generate_daily_report(target_date):
     df_sends["contactId_str"] = df_sends["contactId"].astype(str)
     df_sends["assetId_str"] = df_sends["assetId"].astype(str)
     df_sends["assetId_int"] = pd.to_numeric(df_sends["assetId"], errors='coerce').fillna(0).astype(int)
-    print(f"[PERF_DEBUG] Step 2: SENDS DataFrame created and filtered ({len(df_sends)} rows) in {time.time() - pd_step_start:.2f}s.")
+    debug_print(f"[PERF_DEBUG] Step 2: SENDS DataFrame created and filtered ({len(df_sends)} rows) in {time.time() - pd_step_start:.2f}s.")
 
     # 3. Load bouncebacks
     pd_step_start = time.time()
@@ -221,17 +220,24 @@ def generate_daily_report(target_date):
         df_bb_counts['total_bb'] = df_bb_counts['total_bb'].clip(upper=1)
         
         df_sends = df_sends.merge(df_bb_counts, left_on=["assetId_str", "contactId_str"], right_on=bb_key, how="left")
-        print(f"[PERF_DEBUG] Step 3: BOUNCEBACKS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
+        debug_print(f"[PERF_DEBUG] Step 3: BOUNCEBACKS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
     else:
         df_sends["hard"] = 0
         df_sends["soft"] = 0
         df_sends["total_bb"] = 0
-        print("[PERF_DEBUG] Step 3: Skipped BOUNCEBACKS (no data).")
+        debug_print(f"[PERF_DEBUG] Step 3: Skipped BOUNCEBACKS (no data).")
 
     # 4. Load Clicks
     pd_step_start = time.time()
+    df_clicks = pd.DataFrame()  # Initialize to empty DataFrame
     if email_clickthroughs:
-        df_clicks = pd.DataFrame(email_clickthroughs)
+        # Filter out clicks without campaignId (non-standard eComm data)
+        email_clickthroughs_filtered = [c for c in email_clickthroughs if c.get("campaignId")]
+        excluded_clicks_no_campaign = len(email_clickthroughs) - len(email_clickthroughs_filtered)
+        if excluded_clicks_no_campaign > 0:
+            logger.info(f"Excluded {excluded_clicks_no_campaign} clicks without campaignId (non-standard eComm data)")
+        
+        df_clicks = pd.DataFrame(email_clickthroughs_filtered)
         df_clicks["cid_str"] = df_clicks["contactID"].astype(str)
         df_clicks["asset_id_str"] = df_clicks["emailID"].astype(str)
         
@@ -239,28 +245,55 @@ def generate_daily_report(target_date):
         df_click_counts = df_clicks.groupby(click_key).size().to_frame("total_clicks").reset_index()
         
         df_sends = df_sends.merge(df_click_counts, left_on=["assetId_str", "contactId_str"], right_on=click_key, how="left")
-        print(f"[PERF_DEBUG] Step 4: CLICKS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
+        debug_print(f"[PERF_DEBUG] Step 4: CLICKS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
     else:
         df_sends["total_clicks"] = 0
-        print("[PERF_DEBUG] Step 4: Skipped CLICKS (no data).")
+        debug_print(f"[PERF_DEBUG] Step 4: Skipped CLICKS (no data).")
 
     # 5. Load Open
     pd_step_start = time.time()
     if email_opens:
-        df_opens = pd.DataFrame(email_opens)
+        # Filter out opens without campaignId (non-standard eComm data)
+        email_opens_filtered = [o for o in email_opens if o.get("campaignId")]
+        excluded_opens_no_campaign = len(email_opens) - len(email_opens_filtered)
+        if excluded_opens_no_campaign > 0:
+            logger.info(f"Excluded {excluded_opens_no_campaign} opens without campaignId (non-standard eComm data)")
+        
+        df_opens = pd.DataFrame(email_opens_filtered)
         df_opens["cid_str"] = df_opens["contactID"].astype(str)
         df_opens["asset_id_str"] = df_opens["emailID"].astype(str)
         df_opens["emailAddress"] = df_opens.get("emailAddress", "")
         
+        print(f"\n[OPENS DEBUG] df_opens shape: {df_opens.shape}")
+        print(f"[OPENS DEBUG] df_opens columns: {df_opens.columns.tolist()}")
+        print(f"[OPENS DEBUG] df_opens sample asset_id_str: {df_opens['asset_id_str'].head(3).tolist()}")
+        print(f"[OPENS DEBUG] df_sends sample assetId_str: {df_sends['assetId_str'].head(3).tolist()}")
+        
+        debug_print(f"[OPENS_MERGE_DEBUG] df_opens shape: {df_opens.shape}")
+        debug_print(f"[OPENS_MERGE_DEBUG] df_opens sample asset_id_str: {df_opens['asset_id_str'].head(3).tolist()}")
+        debug_print(f"[OPENS_MERGE_DEBUG] df_sends sample assetId_str: {df_sends['assetId_str'].head(3).tolist()}")
+        
         open_key = ["asset_id_str", "cid_str"]
         df_open_counts = df_opens.groupby(open_key).size().to_frame("total_opens").reset_index()
         
+        print(f"[OPENS DEBUG] df_open_counts shape: {df_open_counts.shape}")
+        print(f"[OPENS DEBUG] df_open_counts sample: {df_open_counts.head(3).to_dict('records')}")
+        
+        debug_print(f"[OPENS_MERGE_DEBUG] df_open_counts shape: {df_open_counts.shape}")
+        debug_print(f"[OPENS_MERGE_DEBUG] Before merge, df_sends columns: {df_sends.columns.tolist()}")
+        
         df_sends = df_sends.merge(df_open_counts, left_on=["assetId_str", "contactId_str"], right_on=open_key, how="left")
-        print(f"[PERF_DEBUG] Step 5: OPENS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
+        
+        print(f"[OPENS DEBUG] After merge, total_opens: min={df_sends['total_opens'].min()}, max={df_sends['total_opens'].max()}, nulls={df_sends['total_opens'].isna().sum()}")
+        print(f"[OPENS DEBUG] Rows with total_opens > 0: {(df_sends['total_opens'] > 0).sum()}\n")
+        
+        debug_print(f"[OPENS_MERGE_DEBUG] After merge, df_sends shape: {df_sends.shape}")
+        debug_print(f"[OPENS_MERGE_DEBUG] total_opens column stats: min={df_sends['total_opens'].min()}, max={df_sends['total_opens'].max()}, null_count={df_sends['total_opens'].isna().sum()}")
+        debug_print(f"[PERF_DEBUG] Step 5: OPENS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
     else:
         df_sends["total_opens"] = 0
         df_opens = pd.DataFrame()
-        print("[PERF_DEBUG] Step 5: Skipped OPENS (no data).")
+        debug_print(f"[PERF_DEBUG] Step 5: Skipped OPENS (no data).")
 
     # Filter out excluded campaigns from sends
     pd_step_start = time.time()
@@ -270,7 +303,7 @@ def generate_daily_report(target_date):
     excluded_count = initial_count - len(df_sends)
     if excluded_count > 0:
         logger.info(f"Excluded {excluded_count} sends from filtered campaigns")
-    print(f"[PERF_DEBUG] Step 5.5: CAMPAIGN FILTERING completed in {time.time() - pd_step_start:.2f}s.")
+    debug_print(f"[PERF_DEBUG] Step 5.5: CAMPAIGN FILTERING completed in {time.time() - pd_step_start:.2f}s.")
 
     # Fill NaNs from merges with 0
     pd_step_start = time.time()
@@ -278,26 +311,28 @@ def generate_daily_report(target_date):
     for col in fill_cols:
         if col in df_sends.columns:
             df_sends[col] = df_sends[col].fillna(0).astype(int)
-    print(f"[PERF_DEBUG] Step 5b: NaNs filled in {time.time() - pd_step_start:.2f}s.")
+    debug_print(f"[PERF_DEBUG] Step 5b: NaNs filled in {time.time() - pd_step_start:.2f}s.")
     
-    # 5c. Detect forwarded emails (opens without sends)
-    # Manual reports only detect forwards via opens, not clicks
+    # 5c. Detect forwarded emails (opens OR clicks without sends)
+    # Eloqua detects forwards when someone who didn't receive the email has activity (opens or clicks)
     pd_step_start = time.time()
     forward_contacts = set()
     
     # Get set of campaigns (asset IDs) that had sends on the target date
     campaigns_with_sends = set(df_sends['assetId_str'].unique())
-    print(f"[CAMPAIGNS_DEBUG] Campaigns with sends: {sorted(campaigns_with_sends)}")
+    debug_print(f"[CAMPAIGNS_DEBUG] Campaigns with sends: {sorted(campaigns_with_sends)}")
     
     # Initialize filtered dataframes
     df_opens_filtered = pd.DataFrame()
     df_clicks_filtered = pd.DataFrame()
     
-    # Find contacts who opened but didn't receive the email (forwards)
-    # IMPORTANT: Only consider opens for campaigns that had sends on the target date
+    # Find contacts who opened OR clicked but didn't receive the email (forwards)
+    # IMPORTANT: Only consider opens for campaigns that had sends on target date
     if not df_opens.empty:
-        # Filter opens to only campaigns that had sends on target date
-        df_opens_filtered = df_opens[df_opens['asset_id_str'].isin(campaigns_with_sends)]
+        # Filter to only campaigns that had sends on the target date
+        df_opens_filtered = df_opens[df_opens['asset_id_str'].isin(campaigns_with_sends)].copy()
+        print(f"[OPENS DEBUG] Opens before campaign filter: {len(df_opens)}")
+        print(f"[OPENS DEBUG] Opens after campaign filter: {len(df_opens_filtered)}")
         
         opens_set = set(zip(df_opens_filtered['asset_id_str'], df_opens_filtered['cid_str']))
         sends_set = set(zip(df_sends['assetId_str'], df_sends['contactId_str']))
@@ -309,7 +344,7 @@ def generate_daily_report(target_date):
         debug_msg += f"[FORWARD_DEBUG] Campaigns with sends on target date: {len(campaigns_with_sends)}\n"
         debug_msg += f"[FORWARD_DEBUG] Opens set size: {len(opens_set)}\n"
         debug_msg += f"[FORWARD_DEBUG] Sends set size: {len(sends_set)}\n"
-        debug_msg += f"[FORWARD_DEBUG] Potential forwards detected: {len(forward_contacts)}\n"
+        debug_msg += f"[FORWARD_DEBUG] Forwards from opens: {len(forward_contacts)}\n"
         
         # Check for opens for Campaign 15269 (the main missing campaign)
         campaign_15269_opens = [(a, c) for a, c in opens_set if a == '15269']
@@ -329,12 +364,32 @@ def generate_daily_report(target_date):
             debug_msg += f"[FORWARD_DEBUG] Asset {asset}, Contact {cid}: Opens={in_opens}, Sends={in_sends}, Forward={in_forwards}\n"
         
         print(debug_msg)
-        with open('forward_debug.log', 'w') as f:
+        with open(f'{LOGS_DIR}/forward_debug.log', 'w') as f:
             f.write(debug_msg)
+    
+    # Also check for clicks without sends (additional forwards)
+    if not df_clicks.empty:
+        # Filter to only campaigns that had sends on the target date
+        df_clicks_filtered = df_clicks[df_clicks['asset_id_str'].isin(campaigns_with_sends)].copy()
+        print(f"[CLICKS DEBUG] Clicks before campaign filter: {len(df_clicks)}")
+        print(f"[CLICKS DEBUG] Clicks after campaign filter: {len(df_clicks_filtered)}")
+        
+        if not df_clicks_filtered.empty:
+            clicks_set = set(zip(df_clicks_filtered['asset_id_str'], df_clicks_filtered['cid_str']))
+            sends_set = set(zip(df_sends['assetId_str'], df_sends['contactId_str']))
+            clicks_forwards = clicks_set - sends_set
+            
+            # Only add if not already in forward_contacts from opens
+            new_click_forwards = clicks_forwards - forward_contacts
+            forward_contacts.update(new_click_forwards)
+            
+            debug_print(f"[FORWARD_DEBUG] Clicks set size: {len(clicks_set)}")
+            debug_print(f"[FORWARD_DEBUG] Forwards from clicks (not already from opens): {len(new_click_forwards)}")
+            debug_print(f"[FORWARD_DEBUG] Total forwards (opens + clicks): {len(forward_contacts)}")
     
     # Add forward contacts to contact_lookup by fetching from cache
     if forward_contacts:
-        print(f"[FORWARD_LOOKUP_DEBUG] Adding {len(forward_contacts)} forward contacts to contact_lookup...")
+        debug_print(f"[FORWARD_LOOKUP_DEBUG] Adding {len(forward_contacts)} forward contacts to contact_lookup...")
         contacts_added = 0
         contacts_not_in_cache = []
         
@@ -355,18 +410,18 @@ def generate_daily_report(target_date):
                 else:
                     contacts_not_in_cache.append(contact_id)
         
-        print(f"[FORWARD_LOOKUP_DEBUG] Added {contacts_added} forward contacts from cache")
-        print(f"[FORWARD_LOOKUP_DEBUG] {len(contacts_not_in_cache)} forward contacts not found in cache")
+        debug_print(f"[FORWARD_LOOKUP_DEBUG] Added {contacts_added} forward contacts from cache")
+        debug_print(f"[FORWARD_LOOKUP_DEBUG] {len(contacts_not_in_cache)} forward contacts not found in cache")
         
         # Fetch missing contacts from Eloqua API
         if contacts_not_in_cache:
-            print(f"[FORWARD_LOOKUP_DEBUG] Fetching {len(contacts_not_in_cache)} missing contacts from Eloqua API...")
+            debug_print(f"[FORWARD_LOOKUP_DEBUG] Fetching {len(contacts_not_in_cache)} missing contacts from Eloqua API...")
             try:
                 # Fetch contacts in batch
                 fetched_contacts = fetch_contacts_batch(contacts_not_in_cache, max_workers=10, use_cache=False)
                 
                 if fetched_contacts:
-                    print(f"[FORWARD_LOOKUP_DEBUG] Successfully fetched {len(fetched_contacts)} contacts from API")
+                    debug_print(f"[FORWARD_LOOKUP_DEBUG] Successfully fetched {len(fetched_contacts)} contacts from API")
                     
                     # Add fetched contacts to both contact_lookup and contact_cache
                     for contact_id, contact_data in fetched_contacts.items():
@@ -383,17 +438,17 @@ def generate_daily_report(target_date):
                         contact_cache[contact_id] = contact_data
                     
                     # Save updated cache
-                    print(f"[FORWARD_LOOKUP_DEBUG] Saving updated cache with {len(fetched_contacts)} new contacts...")
+                    debug_print(f"[FORWARD_LOOKUP_DEBUG] Saving updated cache with {len(fetched_contacts)} new contacts...")
                     save_contact_cache(contact_cache)
-                    print(f"[FORWARD_LOOKUP_DEBUG] Cache saved successfully")
+                    debug_print(f"[FORWARD_LOOKUP_DEBUG] Cache saved successfully")
                 else:
-                    print(f"[FORWARD_LOOKUP_DEBUG] ⚠️ No contacts returned from API")
+                    debug_print(f"[FORWARD_LOOKUP_DEBUG] ⚠️ No contacts returned from API")
                     
             except Exception as e:
-                print(f"[FORWARD_LOOKUP_DEBUG] ⚠️ Error fetching contacts from API: {e}")
+                debug_print(f"[FORWARD_LOOKUP_DEBUG] ⚠️ Error fetching contacts from API: {e}")
                 logger.warning(f"Failed to fetch missing forward contacts: {e}")
         
-        print(f"[FORWARD_LOOKUP_DEBUG] Total contacts in lookup now: {len(contact_lookup)}")
+        debug_print(f"[FORWARD_LOOKUP_DEBUG] Total contacts in lookup now: {len(contact_lookup)}")
     
     if forward_contacts:
         # Create mapping of campaign send dates for forwards
@@ -406,29 +461,31 @@ def generate_daily_report(target_date):
                 send_date = campaign_sends['activityDateParsed'].iloc[0]
                 campaign_send_dates[asset_id] = send_date
         
-        print(f"[FORWARD_DEBUG] Campaign send dates collected for {len(campaign_send_dates)} campaigns")
+        debug_print(f"[FORWARD_DEBUG] Campaign send dates collected for {len(campaign_send_dates)} campaigns")
         
         # Pre-compute opens and clicks counts using groupby (much faster than row-by-row)
-        # Use filtered dataframes that only include campaigns with sends on target date
+        # Use FILTERED opens/clicks data (only campaigns with sends on target date)
         opens_counts = {}
         clicks_counts = {}
         
         if not df_opens_filtered.empty:
             opens_grouped = df_opens_filtered.groupby(['asset_id_str', 'cid_str']).size()
             opens_counts = opens_grouped.to_dict()
-            print(f"[OPENS_COUNTS_DEBUG] opens_counts dictionary size: {len(opens_counts)}")
+            debug_print(f"[OPENS_COUNTS_DEBUG] opens_counts dictionary size: {len(opens_counts)}")
+            # Debug: Show sample keys and their types
+            if len(opens_counts) > 0:
+                sample_key = list(opens_counts.keys())[0]
+                debug_print(f"[OPENS_COUNTS_DEBUG] Sample key: {sample_key}, type: {type(sample_key)}, key types: ({type(sample_key[0])}, {type(sample_key[1])})")
             # Check if our sample forwards are in opens_counts
             sample_keys = [('15269', '389436'), ('15269', '6059'), ('15269', '9343')]
             for key in sample_keys:
                 count = opens_counts.get(key, 0)
-                print(f"[OPENS_COUNTS_DEBUG] Key {key}: {count} opens")
+                debug_print(f"[OPENS_COUNTS_DEBUG] Key {key}: {count} opens")
         
-        if not df_clicks.empty:
-            # Filter clicks to only campaigns with sends on target date
-            df_clicks_filtered = df_clicks[df_clicks['asset_id_str'].isin(campaigns_with_sends)]
-            if not df_clicks_filtered.empty:
-                clicks_grouped = df_clicks_filtered.groupby(['asset_id_str', 'cid_str']).size()
-                clicks_counts = clicks_grouped.to_dict()
+        if not df_clicks_filtered.empty:
+            # Use FILTERED clicks (only campaigns with sends on target date)
+            clicks_grouped = df_clicks_filtered.groupby(['asset_id_str', 'cid_str']).size()
+            clicks_counts = clicks_grouped.to_dict()
         
         forward_rows = []
         skipped_not_in_campaigns = 0
@@ -458,9 +515,17 @@ def generate_daily_report(target_date):
             opens_count = opens_counts.get((asset_id, contact_id), 0)
             clicks_count = clicks_counts.get((asset_id, contact_id), 0)
             
-            # Skip if no opens found (shouldn't happen for forwards, but safety check)
-            if opens_count == 0:
+            # Debug first few lookups
+            if created_rows < 3:
+                debug_print(f"[FORWARD_LOOKUP_DEBUG] Forward #{created_rows+1}: asset={asset_id} (type={type(asset_id)}), contact={contact_id} (type={type(contact_id)}), opens={opens_count}, clicks={clicks_count}")
+            
+            # CRITICAL: Skip if BOTH opens and clicks are zero or negative (invalid forward data)
+            # A valid forward MUST have at least one open OR one click (greater than 0)
+            # This also catches any data quality issues where counts might be None or negative
+            if not (opens_count > 0 or clicks_count > 0):
                 skipped_no_opens += 1
+                if created_rows < 5:  # Log first few skipped for debugging
+                    debug_print(f"[FORWARD_SKIP_DEBUG] Skipping forward: asset={asset_id}, contact={contact_id}, opens={opens_count}, clicks={clicks_count}")
                 continue
             
             created_rows += 1
@@ -494,37 +559,37 @@ def generate_daily_report(target_date):
                 'total_bb': 0
             })
         
-        print(f"[FORWARD_CREATION_DEBUG] Forwards in set: {len(forward_contacts)}")
-        print(f"[FORWARD_CREATION_DEBUG] Rows created: {created_rows}")
-        print(f"[FORWARD_CREATION_DEBUG] Skipped (not in campaigns): {skipped_not_in_campaigns}")
-        print(f"[FORWARD_CREATION_DEBUG] Skipped (no opens count): {skipped_no_opens}")
-        print(f"[FORWARD_CREATION_DEBUG] Final forward_rows: {len(forward_rows)}")
-        print(f"[FORWARD_CREATION_DEBUG] Forward campaigns: {sorted(forward_campaigns_created.keys())}")
-        print(f"[FORWARD_CREATION_DEBUG] Forward counts by campaign: {dict(sorted(forward_campaigns_created.items()))}")
+        debug_print(f"[FORWARD_CREATION_DEBUG] Forwards in set: {len(forward_contacts)}")
+        debug_print(f"[FORWARD_CREATION_DEBUG] Rows created: {created_rows}")
+        debug_print(f"[FORWARD_CREATION_DEBUG] Skipped (not in campaigns): {skipped_not_in_campaigns}")
+        debug_print(f"[FORWARD_CREATION_DEBUG] Skipped (no opens count): {skipped_no_opens}")
+        debug_print(f"[FORWARD_CREATION_DEBUG] Final forward_rows: {len(forward_rows)}")
+        debug_print(f"[FORWARD_CREATION_DEBUG] Forward campaigns: {sorted(forward_campaigns_created.keys())}")
+        debug_print(f"[FORWARD_CREATION_DEBUG] Forward counts by campaign: {dict(sorted(forward_campaigns_created.items()))}")
         
         if forward_rows:
             df_forwards = pd.DataFrame(forward_rows)
-            print(f"[FORWARD_DF_DEBUG] df_forwards shape: {df_forwards.shape}")
-            print(f"[FORWARD_DF_DEBUG] df_forwards columns: {df_forwards.columns.tolist()}")
-            print(f"[FORWARD_DF_DEBUG] total_opens in df_forwards: min={df_forwards['total_opens'].min()}, max={df_forwards['total_opens'].max()}, mean={df_forwards['total_opens'].mean():.2f}")
-            print(f"[FORWARD_DF_DEBUG] Forwards with total_opens > 0: {(df_forwards['total_opens'] > 0).sum()}")
-            print(f"[FORWARD_DF_DEBUG] Forwards with total_opens == 0: {(df_forwards['total_opens'] == 0).sum()}")
+            debug_print(f"[FORWARD_DF_DEBUG] df_forwards shape: {df_forwards.shape}")
+            debug_print(f"[FORWARD_DF_DEBUG] df_forwards columns: {df_forwards.columns.tolist()}")
+            debug_print(f"[FORWARD_DF_DEBUG] total_opens in df_forwards: min={df_forwards['total_opens'].min()}, max={df_forwards['total_opens'].max()}, mean={df_forwards['total_opens'].mean():.2f}")
+            debug_print(f"[FORWARD_DF_DEBUG] Forwards with total_opens > 0: {(df_forwards['total_opens'] > 0).sum()}")
+            debug_print(f"[FORWARD_DF_DEBUG] Forwards with total_opens == 0: {(df_forwards['total_opens'] == 0).sum()}")
             
             df_sends = pd.concat([df_sends, df_forwards], ignore_index=True)
-            print(f"[PERF_DEBUG] Step 5c: Detected {len(forward_rows)} forwarded emails (anti-join) in {time.time() - pd_step_start:.2f}s.")
-            print(f"[MERGE_DEBUG] df_sends length after merge: {len(df_sends)}")
-            print(f"[MERGE_DEBUG] EmailForward count after merge: {(df_sends['emailSendType'] == 'EmailForward').sum()}")
-            print(f"[MERGE_DEBUG] Forwards with total_opens > 0 after merge: {((df_sends['emailSendType'] == 'EmailForward') & (df_sends['total_opens'] > 0)).sum()}")
-            print(f"[MERGE_DEBUG] Forwards with total_opens == 0 after merge: {((df_sends['emailSendType'] == 'EmailForward') & (df_sends['total_opens'] == 0)).sum()}")
-            print(f"[MERGE_DEBUG] Forwards with total_opens NaN after merge: {((df_sends['emailSendType'] == 'EmailForward') & (df_sends['total_opens'].isna())).sum()}")
+            debug_print(f"[PERF_DEBUG] Step 5c: Detected {len(forward_rows)} forwarded emails (anti-join) in {time.time() - pd_step_start:.2f}s.")
+            debug_print(f"[MERGE_DEBUG] df_sends length after merge: {len(df_sends)}")
+            debug_print(f"[MERGE_DEBUG] EmailForward count after merge: {(df_sends['emailSendType'] == 'EmailForward').sum()}")
+            debug_print(f"[MERGE_DEBUG] Forwards with total_opens > 0 after merge: {((df_sends['emailSendType'] == 'EmailForward') & (df_sends['total_opens'] > 0)).sum()}")
+            debug_print(f"[MERGE_DEBUG] Forwards with total_opens == 0 after merge: {((df_sends['emailSendType'] == 'EmailForward') & (df_sends['total_opens'] == 0)).sum()}")
+            debug_print(f"[MERGE_DEBUG] Forwards with total_opens NaN after merge: {((df_sends['emailSendType'] == 'EmailForward') & (df_sends['total_opens'].isna())).sum()}")
         else:
-            print(f"[PERF_DEBUG] Step 5c: No forwarded emails detected in {time.time() - pd_step_start:.2f}s.")
+            debug_print(f"[PERF_DEBUG] Step 5c: No forwarded emails detected in {time.time() - pd_step_start:.2f}s.")
     else:
-        print(f"[PERF_DEBUG] Step 5c: No forwarded emails detected in {time.time() - pd_step_start:.2f}s.")
+        debug_print(f"[PERF_DEBUG] Step 5c: No forwarded emails detected in {time.time() - pd_step_start:.2f}s.")
     
 
     # 6. Load and Merge Data
-    print(f"[PERF_DEBUG] Step 6: Skipped CONTACTS merge (data already included in sends).")
+    debug_print(f"[PERF_DEBUG] Step 6: Skipped CONTACTS merge (data already included in sends).")
 
     # Temporarily disabled for faster testing
     logger.info("Skipping HTML email download (disabled).")
@@ -609,24 +674,18 @@ def generate_daily_report(target_date):
     logger.info(f"Last Activated by User populated for {users_populated}/{forwarded_mask.sum()} forwarded emails")
     
     # df_sends = df_sends[df_sends["Last Activated by User"] != ""].copy()
-    print(f"[PERF_DEBUG] Skipping user filter, keeping all {len(df_sends)} rows.")
+    debug_print(f"[PERF_DEBUG] Skipping user filter, keeping all {len(df_sends)} rows.")
         
     # Filter out emails matching Eloqua Analytics exclusion criteria
     initial_count = len(df_sends)
     
-    # Exclude @hp.com emails
+    # Exclude emails from configured domain
     # Convert to string first to avoid .str accessor errors
     df_sends["emailAddress"] = df_sends["emailAddress"].astype(str)
-    df_sends = df_sends[~df_sends["emailAddress"].str.lower().str.contains("@hp.com", na=False)]
+    df_sends = df_sends[~df_sends["emailAddress"].str.lower().str.contains(EXCLUDE_EMAIL_DOMAIN, na=False)]
     
-    # Exclude specific test/spam email addresses from Eloqua Analytics filter
-    excluded_emails = [
-        "y_110@hotmail.com",
-        "1021001399@qq.com",
-        "2604815709@qq.com",
-        "496707864@qq.com"
-    ]
-    df_sends = df_sends[~df_sends["emailAddress"].str.lower().isin([e.lower() for e in excluded_emails])]
+    # Exclude specific test/spam email addresses from config
+    df_sends = df_sends[~df_sends["emailAddress"].str.lower().isin([e.lower() for e in EXCLUDE_TEST_EMAILS])]
     
     # Filter out incomplete forward records (forwards with no email address or no activity)
     # These are data artifacts where we detected activity but have no valid contact info
@@ -634,10 +693,10 @@ def generate_daily_report(target_date):
     
     # Debug: Check forwards before filtering
     forwards_before = df_sends[df_sends["emailSendType"] == "EmailForward"]
-    print(f"[FILTER_DEBUG] Forwards before filtering: {len(forwards_before)}")
-    print(f"[FILTER_DEBUG] Forwards with NaN email: {forwards_before['emailAddress'].isna().sum()}")
-    print(f"[FILTER_DEBUG] Forwards with empty email: {(forwards_before['emailAddress'] == '').sum()}")
-    print(f"[FILTER_DEBUG] Forwards with no activity: {((forwards_before['total_opens'] == 0) & (forwards_before['total_clicks'] == 0)).sum()}")
+    debug_print(f"[FILTER_DEBUG] Forwards before filtering: {len(forwards_before)}")
+    debug_print(f"[FILTER_DEBUG] Forwards with NaN email: {forwards_before['emailAddress'].isna().sum()}")
+    debug_print(f"[FILTER_DEBUG] Forwards with empty email: {(forwards_before['emailAddress'] == '').sum()}")
+    debug_print(f"[FILTER_DEBUG] Forwards with no activity: {((forwards_before['total_opens'] == 0) & (forwards_before['total_clicks'] == 0)).sum()}")
     
     incomplete_forwards = (df_sends["emailSendType"] == "EmailForward") & (
         (df_sends["emailAddress"].isna()) | 
@@ -647,9 +706,9 @@ def generate_daily_report(target_date):
     df_sends = df_sends[~incomplete_forwards]
     incomplete_count = before_forward_filter - len(df_sends)
     if incomplete_count > 0:
-        print(f"[PERF_DEBUG] Filtered out {incomplete_count} incomplete forward records (no email address or no activity).")
+        debug_print(f"[PERF_DEBUG] Filtered out {incomplete_count} incomplete forward records (no email address or no activity).")
     
-    print(f"[PERF_DEBUG] Filtered @hp.com and excluded test emails, {len(df_sends)} rows remaining (removed {initial_count - len(df_sends)}).")
+    debug_print(f"[PERF_DEBUG] Filtered {EXCLUDE_EMAIL_DOMAIN} and excluded test emails, {len(df_sends)} rows remaining (removed {initial_count - len(df_sends)}).")
     
     # After filtering, remove forwards for campaigns that no longer have any sends
     # This matches Eloqua Analytics behavior: forwards only shown if campaign has valid sends
@@ -664,9 +723,9 @@ def generate_daily_report(target_date):
     removed_forwards = forwards_to_remove.sum()
     df_sends = df_sends[~forwards_to_remove]
     
-    print(f"[FILTER_DEBUG] Campaigns after filtering: {len(campaigns_after_filtering)}")
-    print(f"[FILTER_DEBUG] Removed {removed_forwards} forwards from campaigns without valid sends")
-    print(f"[FILTER_DEBUG] Forwards remaining: {forwards_before - removed_forwards}")
+    debug_print(f"[FILTER_DEBUG] Campaigns after filtering: {len(campaigns_after_filtering)}")
+    debug_print(f"[FILTER_DEBUG] Removed {removed_forwards} forwards from campaigns without valid sends")
+    debug_print(f"[FILTER_DEBUG] Forwards remaining: {forwards_before - removed_forwards}")
 
     # Restore proper email case from contact_lookup (Bulk API returns lowercase, but we want original case)
     def get_proper_cased_email(contact_id, lowercase_email):
@@ -682,7 +741,7 @@ def generate_daily_report(target_date):
         lambda row: get_proper_cased_email(row["contactId_str"], row["emailAddress"]),
         axis=1
     )
-    print(f"[PERF_DEBUG] Restored proper email case from contact lookup.")
+    debug_print(f"[PERF_DEBUG] Restored proper email case from contact lookup.")
 
     df_sends["Email Group"] = df_sends["assetId_int"].map(email_group_map).fillna("")
     
@@ -741,12 +800,7 @@ def generate_daily_report(target_date):
                     else (row["Unique Clicks"] / row["Total Delivered"]) * 100,
         axis=1
     )
-    print(f"[PERF_DEBUG] Step 7: Final logic and calculations applied in {time.time() - pd_step_start:.2f}s.")
-
-    # NOTE: Removed bounced email engagement cleanup (Step 7b)
-    # Reason: Bounced emails CAN have opens/clicks from forwards, which are valid engagement metrics
-    # Even if an email bounces, someone can forward it to the recipient who then opens/clicks it
-    # This matches Eloqua Analytics manual report behavior
+    debug_print(f"[PERF_DEBUG] Step 7: Final logic and calculations applied in {time.time() - pd_step_start:.2f}s.")
 
     pd_step_start = time.time()
     
@@ -776,7 +830,7 @@ def generate_daily_report(target_date):
         "contact_hp_partner_id": "HP Partner Id",
         "contact_partner_name": "Partner Name",
         "contact_market": "Market",
-        # "emailSendType": "Email Send Type"  # Commented out - not displayed in reports
+        # "emailSendType": "Email Send Type"
     }
     
     df_report = df_sends.rename(columns=final_column_map)
@@ -794,12 +848,12 @@ def generate_daily_report(target_date):
         df_report["Email Send Date"] = df_report["Email Send Date"].dt.strftime("%Y-%m-%d %I:%M:%S %p")
     # Convert to string first to avoid .str accessor errors
     df_report["Email Address"] = df_report["Email Address"].astype(str).str.lower()
-    print(f"[PERF_DEBUG] Step 8: Final column renaming and formatting in {time.time() - pd_step_start:.2f}s.")
+    debug_print(f"[PERF_DEBUG] Step 8: Final column renaming and formatting in {time.time() - pd_step_start:.2f}s.")
     
     processing_end_time = time.time()
     logger.info("Processed %d report rows in %.2f seconds.", len(df_report), processing_end_time - processing_start_time)
 
-    output_file = f"data/{target_date}.csv"
+    output_file = f"{DAILY_REPORTS_DIR}/{target_date}.csv"
     
     pd_step_start = time.time()
     df_report = sanitize_dataframe_for_csv(df_report)
@@ -807,11 +861,19 @@ def generate_daily_report(target_date):
         output_file, 
         sep="\t",
         index=False, 
-        encoding="utf-8-sig",
+        encoding="utf-16",
         quoting=csv.QUOTE_MINIMAL
     )
-    print(f"[PERF_DEBUG] Step 9: Sanitized and saved final CSV to {output_file} in {time.time() - pd_step_start:.2f}s.")
+    debug_print(f"[PERF_DEBUG] Step 9: Sanitized and saved final CSV to {output_file} in {time.time() - pd_step_start:.2f}s.")
 
+    # Count forwards before removing the column (if it exists)
+    forwards_count = 0
+    if 'emailSendType' in df_sends.columns:
+        forwards_count = (df_sends['emailSendType'] == 'EmailForward').sum()
+    
     end_time = time.time()
     logger.info("Daily report generation for %s completed in %.2f seconds. Report saved to %s", target_date, end_time - start_time, output_file)
-    return output_file
+    logger.info("Report contains %d forwards (not shown in output)", forwards_count)
+    
+    # Return both the file path and the forward count as a tuple
+    return output_file, forwards_count

@@ -3,7 +3,7 @@ import logging
 import os
 import json
 import re
-from auth import get_valid_access_token
+from core.aws.auth import get_valid_access_token
 from config import BASE_URL
 
 # Setup logging

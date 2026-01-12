@@ -4,7 +4,7 @@ import time
 import logging
 import os
 import json
-from auth import get_valid_access_token
+from core.aws.auth import get_valid_access_token
 from core.utils import save_json
 from config import *
 
@@ -102,11 +102,11 @@ def fetch_activities_bulk(contact_ids, activity_type, batch_index=None):
             "Accept": "application/json"
         }
 
-        for attempt in range(3):
+        for attempt in range(API_RETRY_ATTEMPTS):
             data_resp = requests.get(data_url, headers=download_headers)
             if not data_resp.text.strip():
                 logging.warning("Attempt %d: Empty response, retrying...", attempt + 1)
-                time.sleep(2)
+                time.sleep(API_RETRY_DELAY)
                 continue
 
             try:
@@ -125,7 +125,7 @@ def fetch_activities_bulk(contact_ids, activity_type, batch_index=None):
                     with open(html_debug_file, 'w', encoding='utf-8') as f:
                         f.write(data_resp.text)
                     logging.info("Saved HTML debug to: %s", html_debug_file)
-                time.sleep(2)
+                time.sleep(API_RETRY_DELAY)
 
         logging.error("All download attempts failed for batch %s", batch_index)
         return []

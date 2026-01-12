@@ -12,3 +12,9 @@ email_downloads
 contact_cache.json.gz
 email_downloads_test1
 email_downloads
+authly/
+logs/
+*.log
+.env
+token.json
+auth_config.json
