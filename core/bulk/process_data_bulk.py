@@ -55,10 +55,16 @@ def should_exclude_campaign(campaign_id):
 def sanitize_dataframe_for_csv(df):
     """
     Applies sanitization rules directly to a pandas DataFrame before saving.
+    Removes tabs, newlines, and carriage returns to prevent CSV corruption.
     """
     for col in df.columns:
         if pd.api.types.is_string_dtype(df[col]):
-            df[col] = df[col].astype(str).str.replace('\n', ' ', regex=False).str.replace('\r', ' ', regex=False).str.strip()
+            # Remove tabs (critical for tab-delimited CSV), newlines, and carriage returns
+            df[col] = (df[col].astype(str)
+                      .str.replace('\t', ' ', regex=False)  # Replace tabs with spaces
+                      .str.replace('\n', ' ', regex=False)
+                      .str.replace('\r', ' ', regex=False)
+                      .str.strip())
         elif pd.api.types.is_float_dtype(df[col]):
             df[col] = df[col].fillna(0).astype(int)
     return df
@@ -75,7 +81,14 @@ def generate_daily_report(target_date):
     debug_print(f"[PERF_DEBUG] Data fetch complete. Starting pandas processing...")
 
     target_date_obj = parser.parse(target_date).date()
-    email_sends = data.get("email_sends", [])
+    
+    # Extract email_sends: could be a list or wrapped in {"items": list}
+    email_sends_raw = data.get("email_sends", [])
+    if isinstance(email_sends_raw, dict):
+        email_sends = email_sends_raw.get("items", [])
+    else:
+        email_sends = email_sends_raw
+        
     bouncebacks = data.get("bouncebacks", [])
     campaign_analysis = data.get("campaign_analysis", {}).get("value", [])
     campaign_users = data.get("campaign_users", {}).get("value", [])
@@ -163,10 +176,12 @@ def generate_daily_report(target_date):
     
     unique_sends_dict = {}
     for s in email_sends_filtered:
+        # Include activityDate in the key to preserve multiple sends to same contact on same day
         key = (
             str(s.get("assetId")), 
             str(s.get("contactId")),
-            str(s.get("emailSendType"))
+            str(s.get("emailSendType")),
+            str(s.get("activityDate"))  # Added to preserve duplicate sends at different times
         )
         unique_sends_dict[key] = s
 
@@ -178,6 +193,9 @@ def generate_daily_report(target_date):
         logger.info(f"EmailSendType distribution (before date filter): {dict(send_type_counts)}")
     
     # Filter sends by target date
+    if "activityDate" not in df_sends.columns:
+        logger.error("Missing 'activityDate' column in email sends data. Available columns: %s", df_sends.columns.tolist())
+        return None
     df_sends["activityDateParsed"] = pd.to_datetime(df_sends["activityDate"], errors='coerce')
     df_sends = df_sends.dropna(subset=["activityDateParsed"]) # Drop rows that couldn't be parsed
     if df_sends.empty:
@@ -203,14 +221,34 @@ def generate_daily_report(target_date):
     pd_step_start = time.time()
     if bouncebacks:
         df_bb = pd.DataFrame(bouncebacks)
-        df_bb["cid_str"] = (df_bb.get("contactID", df_bb.get("ContactId"))).astype(str)
-        df_bb["asset_id_str"] = (df_bb.get("emailID", df_bb.get("AssetId", df_bb.get("assetId")))).astype(str)
-        df_bb = df_bb.dropna(subset=["cid_str", "asset_id_str"])
+        # Handle different possible column names for contactID
+        if "contactID" in df_bb.columns:
+            df_bb["contactId_str"] = df_bb["contactID"].astype(str)
+        elif "ContactId" in df_bb.columns:
+            df_bb["contactId_str"] = df_bb["ContactId"].astype(str)
+        elif "contactId" in df_bb.columns:
+            df_bb["contactId_str"] = df_bb["contactId"].astype(str)
+        else:
+            logger.error(f"No contactID column found in bouncebacks. Available columns: {df_bb.columns.tolist()}")
+            df_bb["contactId_str"] = ""
+        
+        # Handle different possible column names for emailID/assetID
+        if "emailID" in df_bb.columns:
+            df_bb["assetId_str"] = df_bb["emailID"].astype(str)
+        elif "AssetId" in df_bb.columns:
+            df_bb["assetId_str"] = df_bb["AssetId"].astype(str)
+        elif "assetId" in df_bb.columns:
+            df_bb["assetId_str"] = df_bb["assetId"].astype(str)
+        else:
+            logger.error(f"No assetID column found in bouncebacks. Available columns: {df_bb.columns.tolist()}")
+            df_bb["assetId_str"] = ""
+        
+        df_bb = df_bb.dropna(subset=["contactId_str", "assetId_str"])
         df_bb['hard'] = (df_bb['isHardBounceback'] == True).astype(int)
         df_bb['soft'] = (df_bb['isHardBounceback'] == False).astype(int)
         df_bb['total_bb'] = 1
         
-        bb_key = ["asset_id_str", "cid_str"]
+        bb_key = ["assetId_str", "contactId_str"]
         df_bb_counts = df_bb.groupby(bb_key)[['hard', 'soft', 'total_bb']].sum().reset_index()
         
         # Cap bouncebacks at 1 per email/contact combination
@@ -219,7 +257,7 @@ def generate_daily_report(target_date):
         df_bb_counts['soft'] = df_bb_counts['soft'].clip(upper=1)
         df_bb_counts['total_bb'] = df_bb_counts['total_bb'].clip(upper=1)
         
-        df_sends = df_sends.merge(df_bb_counts, left_on=["assetId_str", "contactId_str"], right_on=bb_key, how="left")
+        df_sends = df_sends.merge(df_bb_counts, on=bb_key, how="left")
         debug_print(f"[PERF_DEBUG] Step 3: BOUNCEBACKS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
     else:
         df_sends["hard"] = 0
@@ -231,21 +269,33 @@ def generate_daily_report(target_date):
     pd_step_start = time.time()
     df_clicks = pd.DataFrame()  # Initialize to empty DataFrame
     if email_clickthroughs:
-        # Filter out clicks without campaignId (non-standard eComm data)
-        email_clickthroughs_filtered = [c for c in email_clickthroughs if c.get("campaignId")]
-        excluded_clicks_no_campaign = len(email_clickthroughs) - len(email_clickthroughs_filtered)
-        if excluded_clicks_no_campaign > 0:
-            logger.info(f"Excluded {excluded_clicks_no_campaign} clicks without campaignId (non-standard eComm data)")
-        
-        df_clicks = pd.DataFrame(email_clickthroughs_filtered)
-        df_clicks["cid_str"] = df_clicks["contactID"].astype(str)
-        df_clicks["asset_id_str"] = df_clicks["emailID"].astype(str)
-        
-        click_key = ["asset_id_str", "cid_str"]
-        df_click_counts = df_clicks.groupby(click_key).size().to_frame("total_clicks").reset_index()
-        
-        df_sends = df_sends.merge(df_click_counts, left_on=["assetId_str", "contactId_str"], right_on=click_key, how="left")
-        debug_print(f"[PERF_DEBUG] Step 4: CLICKS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
+        df_clicks = pd.DataFrame(email_clickthroughs)
+        if not df_clicks.empty:
+            # Handle different possible column names
+            if "contactID" in df_clicks.columns:
+                df_clicks["contactId_str"] = df_clicks["contactID"].astype(str)
+            elif "contactId" in df_clicks.columns:
+                df_clicks["contactId_str"] = df_clicks["contactId"].astype(str)
+            else:
+                logger.warning(f"No contactID column in clicks. Available: {df_clicks.columns.tolist()}")
+                df_clicks["contactId_str"] = ""
+            
+            if "emailID" in df_clicks.columns:
+                df_clicks["assetId_str"] = df_clicks["emailID"].astype(str)
+            elif "assetId" in df_clicks.columns:
+                df_clicks["assetId_str"] = df_clicks["assetId"].astype(str)
+            else:
+                logger.warning(f"No emailID column in clicks. Available: {df_clicks.columns.tolist()}")
+                df_clicks["assetId_str"] = ""
+            
+            click_key = ["assetId_str", "contactId_str"]
+            df_click_counts = df_clicks.groupby(click_key).size().to_frame("total_clicks").reset_index()
+            
+            df_sends = df_sends.merge(df_click_counts, on=click_key, how="left")
+            debug_print(f"[PERF_DEBUG] Step 4: CLICKS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
+        else:
+            df_sends["total_clicks"] = 0
+            debug_print(f"[PERF_DEBUG] Step 4: No valid clicks data (missing required columns).")
     else:
         df_sends["total_clicks"] = 0
         debug_print(f"[PERF_DEBUG] Step 4: Skipped CLICKS (no data).")
@@ -253,43 +303,107 @@ def generate_daily_report(target_date):
     # 5. Load Open
     pd_step_start = time.time()
     if email_opens:
-        # Filter out opens without campaignId (non-standard eComm data)
-        email_opens_filtered = [o for o in email_opens if o.get("campaignId")]
-        excluded_opens_no_campaign = len(email_opens) - len(email_opens_filtered)
-        if excluded_opens_no_campaign > 0:
-            logger.info(f"Excluded {excluded_opens_no_campaign} opens without campaignId (non-standard eComm data)")
-        
-        df_opens = pd.DataFrame(email_opens_filtered)
-        df_opens["cid_str"] = df_opens["contactID"].astype(str)
-        df_opens["asset_id_str"] = df_opens["emailID"].astype(str)
-        df_opens["emailAddress"] = df_opens.get("emailAddress", "")
-        
-        print(f"\n[OPENS DEBUG] df_opens shape: {df_opens.shape}")
-        print(f"[OPENS DEBUG] df_opens columns: {df_opens.columns.tolist()}")
-        print(f"[OPENS DEBUG] df_opens sample asset_id_str: {df_opens['asset_id_str'].head(3).tolist()}")
-        print(f"[OPENS DEBUG] df_sends sample assetId_str: {df_sends['assetId_str'].head(3).tolist()}")
-        
-        debug_print(f"[OPENS_MERGE_DEBUG] df_opens shape: {df_opens.shape}")
-        debug_print(f"[OPENS_MERGE_DEBUG] df_opens sample asset_id_str: {df_opens['asset_id_str'].head(3).tolist()}")
-        debug_print(f"[OPENS_MERGE_DEBUG] df_sends sample assetId_str: {df_sends['assetId_str'].head(3).tolist()}")
-        
-        open_key = ["asset_id_str", "cid_str"]
-        df_open_counts = df_opens.groupby(open_key).size().to_frame("total_opens").reset_index()
-        
-        print(f"[OPENS DEBUG] df_open_counts shape: {df_open_counts.shape}")
-        print(f"[OPENS DEBUG] df_open_counts sample: {df_open_counts.head(3).to_dict('records')}")
-        
-        debug_print(f"[OPENS_MERGE_DEBUG] df_open_counts shape: {df_open_counts.shape}")
-        debug_print(f"[OPENS_MERGE_DEBUG] Before merge, df_sends columns: {df_sends.columns.tolist()}")
-        
-        df_sends = df_sends.merge(df_open_counts, left_on=["assetId_str", "contactId_str"], right_on=open_key, how="left")
-        
-        print(f"[OPENS DEBUG] After merge, total_opens: min={df_sends['total_opens'].min()}, max={df_sends['total_opens'].max()}, nulls={df_sends['total_opens'].isna().sum()}")
-        print(f"[OPENS DEBUG] Rows with total_opens > 0: {(df_sends['total_opens'] > 0).sum()}\n")
-        
-        debug_print(f"[OPENS_MERGE_DEBUG] After merge, df_sends shape: {df_sends.shape}")
-        debug_print(f"[OPENS_MERGE_DEBUG] total_opens column stats: min={df_sends['total_opens'].min()}, max={df_sends['total_opens'].max()}, null_count={df_sends['total_opens'].isna().sum()}")
-        debug_print(f"[PERF_DEBUG] Step 5: OPENS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
+        df_opens = pd.DataFrame(email_opens)
+        if not df_opens.empty:
+            # Handle different possible column names
+            if "contactID" in df_opens.columns:
+                df_opens["contactId_str"] = df_opens["contactID"].astype(str)
+            elif "contactId" in df_opens.columns:
+                df_opens["contactId_str"] = df_opens["contactId"].astype(str)
+            else:
+                logger.warning(f"No contactID column in opens. Available: {df_opens.columns.tolist()}")
+                df_opens["contactId_str"] = ""
+            
+            if "emailID" in df_opens.columns:
+                df_opens["assetId_str"] = df_opens["emailID"].astype(str)
+            elif "assetId" in df_opens.columns:
+                df_opens["assetId_str"] = df_opens["assetId"].astype(str)
+            else:
+                logger.warning(f"No emailID column in opens. Available: {df_opens.columns.tolist()}")
+                df_opens["assetId_str"] = ""
+            
+            df_opens["emailAddress"] = df_opens.get("emailAddress", "")
+            
+            # DIAGNOSTIC: Analyze what email IDs are in opens vs sends
+            opens_email_ids = set(df_opens['assetId_str'].unique())
+            sends_email_ids = set(df_sends['assetId_str'].unique())
+            overlap = opens_email_ids.intersection(sends_email_ids)
+            missing_email_ids = sends_email_ids - opens_email_ids
+            
+            print(f"\n[DIAGNOSTIC] ==========================================")
+            print(f"[DIAGNOSTIC] Total opens fetched: {len(df_opens)}")
+            print(f"[DIAGNOSTIC] Unique email IDs in opens: {len(opens_email_ids)}")
+            print(f"[DIAGNOSTIC] Unique email IDs in sends (target date): {len(sends_email_ids)}")
+            print(f"[DIAGNOSTIC] Email IDs with opens data: {len(overlap)}")
+            print(f"[DIAGNOSTIC] Email IDs sent but NO opens fetched: {len(missing_email_ids)}")
+            if missing_email_ids:
+                print(f"[DIAGNOSTIC] Sample missing email IDs: {list(missing_email_ids)[:5]}")
+            print(f"[DIAGNOSTIC] ==========================================\n")
+            
+            print(f"\n[OPENS DEBUG] df_opens shape: {df_opens.shape}")
+            print(f"[OPENS DEBUG] df_opens columns: {df_opens.columns.tolist()}")
+            print(f"[OPENS DEBUG] df_opens sample assetId_str: {df_opens['assetId_str'].head(3).tolist()}")
+            print(f"[OPENS DEBUG] df_sends sample assetId_str: {df_sends['assetId_str'].head(3).tolist()}")
+            
+            debug_print(f"[OPENS_MERGE_DEBUG] df_opens shape: {df_opens.shape}")
+            debug_print(f"[OPENS_MERGE_DEBUG] df_opens sample assetId_str: {df_opens['assetId_str'].head(3).tolist()}")
+            debug_print(f"[OPENS_MERGE_DEBUG] df_sends sample assetId_str: {df_sends['assetId_str'].head(3).tolist()}")
+            
+            open_key = ["assetId_str", "contactId_str"]
+            df_open_counts = df_opens.groupby(open_key).size().to_frame("total_opens").reset_index()
+            
+            print(f"[OPENS DEBUG] df_open_counts shape: {df_open_counts.shape}")
+            print(f"[OPENS DEBUG] df_open_counts sample: {df_open_counts.head(3).to_dict('records')}")
+            
+            debug_print(f"[OPENS_MERGE_DEBUG] df_open_counts shape: {df_open_counts.shape}")
+            debug_print(f"[OPENS_MERGE_DEBUG] Before merge, df_sends columns: {df_sends.columns.tolist()}")
+            
+            # Debug: Check sample records before merge
+            sample_send_keys = list(zip(df_sends['assetId_str'].head(5), df_sends['contactId_str'].head(5)))
+            sample_open_keys = list(zip(df_open_counts['assetId_str'].head(5), df_open_counts['contactId_str'].head(5)))
+            print(f"[MERGE DEBUG] Sample send keys (assetId, contactId): {sample_send_keys[:3]}")
+            print(f"[MERGE DEBUG] Sample open keys (assetId, contactId): {sample_open_keys[:3]}")
+            print(f"[MERGE DEBUG] df_sends dtypes: assetId_str={df_sends['assetId_str'].dtype}, contactId_str={df_sends['contactId_str'].dtype}")
+            print(f"[MERGE DEBUG] df_open_counts dtypes: assetId_str={df_open_counts['assetId_str'].dtype}, contactId_str={df_open_counts['contactId_str'].dtype}")
+            
+            # Debug: Save sample data for investigation
+            debug_sample_file = f"{LOGS_DIR}/merge_debug_2025-11-21.txt"
+            with open(debug_sample_file, 'w') as f:
+                f.write("=== SENDS SAMPLE (first 10) ===\n")
+                for idx, row in df_sends.head(10).iterrows():
+                    f.write(f"assetId_str='{row['assetId_str']}', contactId_str='{row['contactId_str']}', emailAddress='{row.get('emailAddress', '')}'\n")
+                f.write("\n=== OPENS SAMPLE (first 10) ===\n")
+                for idx, row in df_open_counts.head(10).iterrows():
+                    f.write(f"assetId_str='{row['assetId_str']}', contactId_str='{row['contactId_str']}', total_opens={row['total_opens']}\n")
+                f.write(f"\n=== CHECKING michael.jones@mymlc.com ===\n")
+                michael_sends = df_sends[df_sends.get('emailAddress', pd.Series()) == 'michael.jones@mymlc.com']
+                if not michael_sends.empty:
+                    for idx, row in michael_sends.iterrows():
+                        f.write(f"SEND: assetId='{row['assetId_str']}', contactId='{row['contactId_str']}'\n")
+                        # Check if this combination exists in opens
+                        matching_open = df_open_counts[
+                            (df_open_counts['assetId_str'] == row['assetId_str']) & 
+                            (df_open_counts['contactId_str'] == row['contactId_str'])
+                        ]
+                        if not matching_open.empty:
+                            f.write(f"  OPEN FOUND: total_opens={matching_open.iloc[0]['total_opens']}\n")
+                        else:
+                            f.write(f"  NO MATCHING OPEN\n")
+            print(f"[DEBUG] Saved merge debug info to {debug_sample_file}")
+            
+            df_sends = df_sends.merge(df_open_counts, on=open_key, how="left")
+            
+            print(f"[OPENS DEBUG] After merge, total_opens: min={df_sends['total_opens'].min()}, max={df_sends['total_opens'].max()}, nulls={df_sends['total_opens'].isna().sum()}")
+            print(f"[OPENS DEBUG] Rows with total_opens > 0: {(df_sends['total_opens'] > 0).sum()}")
+            print(f"[OPENS DEBUG] Sample assetId+contactId with total_opens: {df_sends[df_sends['total_opens'] > 0][['assetId_str', 'contactId_str', 'total_opens']].head(3).to_dict('records')}\n")
+            
+            debug_print(f"[OPENS_MERGE_DEBUG] After merge, df_sends shape: {df_sends.shape}")
+            debug_print(f"[OPENS_MERGE_DEBUG] total_opens column stats: min={df_sends['total_opens'].min()}, max={df_sends['total_opens'].max()}, null_count={df_sends['total_opens'].isna().sum()}")
+            debug_print(f"[PERF_DEBUG] Step 5: OPENS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
+        else:
+            df_sends["total_opens"] = 0
+            df_opens = pd.DataFrame()
+            debug_print(f"[PERF_DEBUG] Step 5: No valid opens data (missing required columns).")
     else:
         df_sends["total_opens"] = 0
         df_opens = pd.DataFrame()
@@ -330,11 +444,11 @@ def generate_daily_report(target_date):
     # IMPORTANT: Only consider opens for campaigns that had sends on target date
     if not df_opens.empty:
         # Filter to only campaigns that had sends on the target date
-        df_opens_filtered = df_opens[df_opens['asset_id_str'].isin(campaigns_with_sends)].copy()
+        df_opens_filtered = df_opens[df_opens['assetId_str'].isin(campaigns_with_sends)].copy()
         print(f"[OPENS DEBUG] Opens before campaign filter: {len(df_opens)}")
         print(f"[OPENS DEBUG] Opens after campaign filter: {len(df_opens_filtered)}")
         
-        opens_set = set(zip(df_opens_filtered['asset_id_str'], df_opens_filtered['cid_str']))
+        opens_set = set(zip(df_opens_filtered['assetId_str'], df_opens_filtered['contactId_str']))
         sends_set = set(zip(df_sends['assetId_str'], df_sends['contactId_str']))
         forward_contacts.update(opens_set - sends_set)
         
@@ -370,12 +484,12 @@ def generate_daily_report(target_date):
     # Also check for clicks without sends (additional forwards)
     if not df_clicks.empty:
         # Filter to only campaigns that had sends on the target date
-        df_clicks_filtered = df_clicks[df_clicks['asset_id_str'].isin(campaigns_with_sends)].copy()
+        df_clicks_filtered = df_clicks[df_clicks['assetId_str'].isin(campaigns_with_sends)].copy()
         print(f"[CLICKS DEBUG] Clicks before campaign filter: {len(df_clicks)}")
         print(f"[CLICKS DEBUG] Clicks after campaign filter: {len(df_clicks_filtered)}")
         
         if not df_clicks_filtered.empty:
-            clicks_set = set(zip(df_clicks_filtered['asset_id_str'], df_clicks_filtered['cid_str']))
+            clicks_set = set(zip(df_clicks_filtered['assetId_str'], df_clicks_filtered['contactId_str']))
             sends_set = set(zip(df_sends['assetId_str'], df_sends['contactId_str']))
             clicks_forwards = clicks_set - sends_set
             
@@ -469,7 +583,7 @@ def generate_daily_report(target_date):
         clicks_counts = {}
         
         if not df_opens_filtered.empty:
-            opens_grouped = df_opens_filtered.groupby(['asset_id_str', 'cid_str']).size()
+            opens_grouped = df_opens_filtered.groupby(['assetId_str', 'contactId_str']).size()
             opens_counts = opens_grouped.to_dict()
             debug_print(f"[OPENS_COUNTS_DEBUG] opens_counts dictionary size: {len(opens_counts)}")
             # Debug: Show sample keys and their types
@@ -484,7 +598,7 @@ def generate_daily_report(target_date):
         
         if not df_clicks_filtered.empty:
             # Use FILTERED clicks (only campaigns with sends on target date)
-            clicks_grouped = df_clicks_filtered.groupby(['asset_id_str', 'cid_str']).size()
+            clicks_grouped = df_clicks_filtered.groupby(['assetId_str', 'contactId_str']).size()
             clicks_counts = clicks_grouped.to_dict()
         
         forward_rows = []

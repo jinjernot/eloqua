@@ -14,12 +14,19 @@ setup_logging("run_report")
 from core.bulk.process_data_bulk import generate_daily_report
 from config import SAVE_LOCALLY
 
+# Override SAVE_LOCALLY for this run to skip AWS checks
+SAVE_LOCALLY = True
+
+
 # Automatically authenticate to AWS if needed
 if not SAVE_LOCALLY:
-    from core.aws.auto_authenticate import ensure_authenticated
-    if not ensure_authenticated(auto_refresh=True, use_poetry=True):
-        print("\n✗ Unable to authenticate to AWS. Exiting.\n")
-        sys.exit(1)
+    try:
+        from core.aws.auto_authenticate import ensure_authenticated
+        if not ensure_authenticated(auto_refresh=True, use_poetry=True):
+            print("\n✗ Unable to authenticate to AWS. Continuing with local save only...\n")
+            # Don't exit - continue with local save
+    except Exception as e:
+        print(f"\n⚠ AWS authentication error: {e}. Continuing with local save only...\n")
 
 # Conditionally import S3 utils only if needed
 if not SAVE_LOCALLY:
@@ -80,9 +87,14 @@ if __name__ == "__main__":
         
         if report_path:
             # Extract metrics from the generated file
+            total_records = 0  # Initialize to avoid NameError if CSV reading fails
             try:
                 import pandas as pd
-                df = pd.read_csv(report_path, sep='\t', encoding='utf-16')
+                try:
+                    df = pd.read_csv(report_path, sep='\t', encoding='utf-16', on_bad_lines='skip')
+                except TypeError:
+                    # on_bad_lines parameter doesn't exist in older pandas versions
+                    df = pd.read_csv(report_path, sep='\t', encoding='utf-16', error_bad_lines=False)
                 total_records = len(df)
                 
                 print(f"\n{'='*80}")

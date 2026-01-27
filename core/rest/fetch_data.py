@@ -259,9 +259,15 @@ def fetch_data(endpoint, filename, extra_params=None):
             all_data.extend(elements)
             print(f"[INFO] Fetched page {page} from {endpoint.split('/')[-1]}: {len(elements)} records")
             
-            # Check if there are more pages
-            total = data.get("total", 0)
-            if len(all_data) >= total:
+            # Limit to 40 pages max (200,000 records with batching)
+            # With email ID batching, each batch should stay under this limit
+            if page >= 40:
+                print(f"[INFO] Reached page limit (40 pages = 200k records max)")
+                break
+            
+            # Stop if we got a partial page (no more data)
+            if len(elements) < 5000:
+                print(f"[INFO] Received partial page ({len(elements)} < 5000), stopping pagination")
                 break
                 
             page += 1
