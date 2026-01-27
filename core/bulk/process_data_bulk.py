@@ -176,12 +176,14 @@ def generate_daily_report(target_date):
     
     unique_sends_dict = {}
     for s in email_sends_filtered:
-        # Include activityDate in the key to preserve multiple sends to same contact on same day
+        # Deduplicate by email+contact only (not timestamp) to match aggregation logic for bouncebacks/opens/clicks
+        # When same email is sent multiple times to same contact, we keep the last send and aggregate all metrics
+        # This matches Eloqua Analytics behavior where multiple sends = one record with cumulative metrics
         key = (
             str(s.get("assetId")), 
             str(s.get("contactId")),
-            str(s.get("emailSendType")),
-            str(s.get("activityDate"))  # Added to preserve duplicate sends at different times
+            str(s.get("emailSendType"))
+            # Note: activityDate removed to ensure proper metric aggregation for duplicate sends
         )
         unique_sends_dict[key] = s
 
