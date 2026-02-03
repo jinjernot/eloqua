@@ -175,19 +175,68 @@ def generate_daily_report(target_date):
         logger.info(f"Excluded {excluded_no_campaign} sends without campaignId (non-standard eComm data)")
     
     unique_sends_dict = {}
+    na34078_debug = []
     for s in email_sends_filtered:
-        # Deduplicate by email+contact only (not timestamp) to match aggregation logic for bouncebacks/opens/clicks
-        # When same email is sent multiple times to same contact, we keep the last send and aggregate all metrics
-        # This matches Eloqua Analytics behavior where multiple sends = one record with cumulative metrics
-        key = (
-            str(s.get("assetId")), 
-            str(s.get("contactId")),
-            str(s.get("emailSendType"))
-            # Note: activityDate removed to ensure proper metric aggregation for duplicate sends
-        )
+        # Use externalId as unique identifier - this is Eloqua's unique activity ID
+        # Each send activity has a unique externalId even if same contact/asset/time
+        # If externalId is missing, fall back to compound key with activityDate
+        external_id = s.get("externalId")
+        
+        # Debug NA_34078 (email ID 18010)
+        if str(s.get("assetId")) == "18010":
+            na34078_debug.append({
+                'contactId': s.get("contactId"),
+                'externalId': external_id,
+                'activityDate': s.get("activityDate"),
+                'emailAddress': s.get("emailAddress")
+            })
+        
+        if external_id:
+            key = str(external_id)
+        else:
+            # Fallback: Include activityDate in key to preserve multiple sends to same contact on same day
+            key = (
+                str(s.get("assetId")), 
+                str(s.get("contactId")),
+                str(s.get("emailSendType")),
+                str(s.get("activityDate"))
+            )
         unique_sends_dict[key] = s
+    
+    # Debug output for NA_34078
+    if len(na34078_debug) > 0:
+        print(f"\n[NA_34078 DEBUG] Total sends before dedup: {len(na34078_debug)}")
+        contact_groups = {}
+        for item in na34078_debug:
+            cid = item['contactId']
+            if cid not in contact_groups:
+                contact_groups[cid] = []
+            contact_groups[cid].append(item)
+        
+        multi_send_contacts = {k: v for k, v in contact_groups.items() if len(v) > 1}
+        print(f"[NA_34078 DEBUG] Contacts with multiple sends: {len(multi_send_contacts)}")
+        
+        # Check externalId availability
+        has_external_id = sum(1 for item in na34078_debug if item['externalId'] is not None and item['externalId'] != '')
+        print(f"[NA_34078 DEBUG] Sends with externalId: {has_external_id}/{len(na34078_debug)}")
+        
+        if len(multi_send_contacts) > 0:
+            print(f"[NA_34078 DEBUG] Sample multi-send contacts:")
+            for cid, sends in list(multi_send_contacts.items())[:3]:
+                print(f"  Contact {cid} ({sends[0]['emailAddress']}): {len(sends)} sends")
+                for send in sends:
+                    print(f"    - {send['activityDate']} | externalId={send['externalId']}")
+        print()
 
+    print(f"[DEBUG] unique_sends_dict has {len(unique_sends_dict)} unique keys (was {len(email_sends_filtered)} before dedup)")
+    na34078_in_dict = sum(1 for v in unique_sends_dict.values() if str(v.get('assetId')) == '18010')
+    print(f"[DEBUG] NA_34078 in dict: {na34078_in_dict} rows (was 1812 before)")
+    
     df_sends = pd.DataFrame(list(unique_sends_dict.values()))
+    
+    print(f"[DEBUG] After DataFrame creation: df_sends has {len(df_sends)} rows")
+    na34078_after_dedup = len(df_sends[df_sends['assetId'] == '18010'])
+    print(f"[DEBUG] NA_34078 after DataFrame: {na34078_after_dedup} rows")
     
     # Log emailSendType distribution
     if "emailSendType" in df_sends.columns:
@@ -294,6 +343,17 @@ def generate_daily_report(target_date):
             df_click_counts = df_clicks.groupby(click_key).size().to_frame("total_clicks").reset_index()
             
             df_sends = df_sends.merge(df_click_counts, on=click_key, how="left")
+            
+            # Assign activity to LAST (most recent) send for each contact+email
+            # When email sent multiple times, user typically responds to the latest one
+            # Sort by activityDateParsed first to ensure 'last' means most recent by time
+            df_sends = df_sends.sort_values('activityDateParsed', ascending=True)
+            df_sends['is_last_send'] = ~df_sends.duplicated(subset=['assetId_str', 'contactId_str'], keep='last')
+            
+            # Zero out activity for all except the last send
+            df_sends.loc[~df_sends['is_last_send'], 'total_clicks'] = 0
+            logging.info(f"[CLICKS DEBUG] Activity assigned to LAST send only (by activityDateParsed)")
+            
             debug_print(f"[PERF_DEBUG] Step 4: CLICKS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
         else:
             df_sends["total_clicks"] = 0
@@ -352,21 +412,28 @@ def generate_daily_report(target_date):
             debug_print(f"[OPENS_MERGE_DEBUG] df_sends sample assetId_str: {df_sends['assetId_str'].head(3).tolist()}")
             
             open_key = ["assetId_str", "contactId_str"]
-            df_open_counts = df_opens.groupby(open_key).size().to_frame("total_opens").reset_index()
+            # Keep the earliest open timestamp to match with the correct send
+            # Group by assetId+contactId and get total opens + first open timestamp
+            df_open_agg = df_opens.groupby(open_key).agg({
+                'openDateHour': 'min',  # Get earliest open timestamp
+            }).reset_index()
+            df_open_agg['total_opens'] = df_opens.groupby(open_key).size().values
+            # Convert to datetime and strip timezone for comparison
+            df_open_agg['firstOpenDate'] = pd.to_datetime(df_open_agg['openDateHour'], errors='coerce', utc=True).dt.tz_localize(None)
             
-            print(f"[OPENS DEBUG] df_open_counts shape: {df_open_counts.shape}")
-            print(f"[OPENS DEBUG] df_open_counts sample: {df_open_counts.head(3).to_dict('records')}")
+            print(f"[OPENS DEBUG] df_open_agg shape: {df_open_agg.shape}")
+            print(f"[OPENS DEBUG] df_open_agg sample: {df_open_agg.head(3).to_dict('records')}")
             
-            debug_print(f"[OPENS_MERGE_DEBUG] df_open_counts shape: {df_open_counts.shape}")
+            debug_print(f"[OPENS_MERGE_DEBUG] df_open_agg shape: {df_open_agg.shape}")
             debug_print(f"[OPENS_MERGE_DEBUG] Before merge, df_sends columns: {df_sends.columns.tolist()}")
             
             # Debug: Check sample records before merge
             sample_send_keys = list(zip(df_sends['assetId_str'].head(5), df_sends['contactId_str'].head(5)))
-            sample_open_keys = list(zip(df_open_counts['assetId_str'].head(5), df_open_counts['contactId_str'].head(5)))
+            sample_open_keys = list(zip(df_open_agg['assetId_str'].head(5), df_open_agg['contactId_str'].head(5)))
             print(f"[MERGE DEBUG] Sample send keys (assetId, contactId): {sample_send_keys[:3]}")
             print(f"[MERGE DEBUG] Sample open keys (assetId, contactId): {sample_open_keys[:3]}")
             print(f"[MERGE DEBUG] df_sends dtypes: assetId_str={df_sends['assetId_str'].dtype}, contactId_str={df_sends['contactId_str'].dtype}")
-            print(f"[MERGE DEBUG] df_open_counts dtypes: assetId_str={df_open_counts['assetId_str'].dtype}, contactId_str={df_open_counts['contactId_str'].dtype}")
+            print(f"[MERGE DEBUG] df_open_agg dtypes: assetId_str={df_open_agg['assetId_str'].dtype}, contactId_str={df_open_agg['contactId_str'].dtype}")
             
             # Debug: Save sample data for investigation
             debug_sample_file = f"{LOGS_DIR}/merge_debug_2025-11-21.txt"
@@ -375,29 +442,78 @@ def generate_daily_report(target_date):
                 for idx, row in df_sends.head(10).iterrows():
                     f.write(f"assetId_str='{row['assetId_str']}', contactId_str='{row['contactId_str']}', emailAddress='{row.get('emailAddress', '')}'\n")
                 f.write("\n=== OPENS SAMPLE (first 10) ===\n")
-                for idx, row in df_open_counts.head(10).iterrows():
-                    f.write(f"assetId_str='{row['assetId_str']}', contactId_str='{row['contactId_str']}', total_opens={row['total_opens']}\n")
+                for idx, row in df_open_agg.head(10).iterrows():
+                    f.write(f"assetId_str='{row['assetId_str']}', contactId_str='{row['contactId_str']}', total_opens={row['total_opens']}, firstOpenDate={row['firstOpenDate']}\n")
                 f.write(f"\n=== CHECKING michael.jones@mymlc.com ===\n")
                 michael_sends = df_sends[df_sends.get('emailAddress', pd.Series()) == 'michael.jones@mymlc.com']
                 if not michael_sends.empty:
                     for idx, row in michael_sends.iterrows():
                         f.write(f"SEND: assetId='{row['assetId_str']}', contactId='{row['contactId_str']}'\n")
                         # Check if this combination exists in opens
-                        matching_open = df_open_counts[
-                            (df_open_counts['assetId_str'] == row['assetId_str']) & 
-                            (df_open_counts['contactId_str'] == row['contactId_str'])
+                        matching_open = df_open_agg[
+                            (df_open_agg['assetId_str'] == row['assetId_str']) & 
+                            (df_open_agg['contactId_str'] == row['contactId_str'])
                         ]
                         if not matching_open.empty:
-                            f.write(f"  OPEN FOUND: total_opens={matching_open.iloc[0]['total_opens']}\n")
+                            f.write(f"  OPEN FOUND: total_opens={matching_open.iloc[0]['total_opens']}, firstOpenDate={matching_open.iloc[0]['firstOpenDate']}\n")
                         else:
                             f.write(f"  NO MATCHING OPEN\n")
             print(f"[DEBUG] Saved merge debug info to {debug_sample_file}")
             
-            df_sends = df_sends.merge(df_open_counts, on=open_key, how="left")
+            df_sends = df_sends.merge(df_open_agg, on=open_key, how="left")
+            
+            # Assign opens to the send that happened IMMEDIATELY BEFORE the first open
+            # For duplicate sends, we need to match the open to whichever send it actually responded to
+            # Sort by activityDateParsed to ensure chronological order
+            df_sends = df_sends.sort_values(['assetId_str', 'contactId_str', 'activityDateParsed'], ascending=True)
+            
+            # For contacts with opens, find which send the open belongs to
+            # The open belongs to the send that happened right before it (not necessarily the last send)
+            def assign_opens_to_correct_send(group):
+                if group['total_opens'].isna().all() or (group['total_opens'] == 0).all():
+                    # No opens for this contact+email, nothing to do
+                    return group
+                
+                # Get the first open timestamp
+                first_open = group['firstOpenDate'].iloc[0]
+                if pd.isna(first_open):
+                    # No valid open date, fall back to last send
+                    group['is_open_send'] = False
+                    group.iloc[-1, group.columns.get_loc('is_open_send')] = True
+                    return group
+                
+                # Find the send that happened right before the first open
+                # Filter sends that happened before the open
+                sends_before_open = group[group['activityDateParsed'] <= first_open]
+                
+                if len(sends_before_open) > 0:
+                    # Assign opens to the most recent send before the open
+                    group['is_open_send'] = False
+                    last_send_before_open_idx = sends_before_open.index[-1]
+                    group.loc[last_send_before_open_idx, 'is_open_send'] = True
+                else:
+                    # Open happened before any recorded send (edge case) - assign to first send
+                    group['is_open_send'] = False
+                    group.iloc[0, group.columns.get_loc('is_open_send')] = True
+                
+                return group
+            
+            # Apply the logic to each contact+email group
+            df_sends = df_sends.groupby(['assetId_str', 'contactId_str'], group_keys=False).apply(assign_opens_to_correct_send)
+            
+            # Zero out opens for sends that didn't trigger the open
+            df_sends['is_open_send'] = df_sends['is_open_send'].fillna(False)
+            df_sends.loc[~df_sends['is_open_send'], 'total_opens'] = 0
+            
+            logging.info(f"[OPENS DEBUG] Activity assigned to send IMMEDIATELY BEFORE first open (by timestamp matching)")
             
             print(f"[OPENS DEBUG] After merge, total_opens: min={df_sends['total_opens'].min()}, max={df_sends['total_opens'].max()}, nulls={df_sends['total_opens'].isna().sum()}")
             print(f"[OPENS DEBUG] Rows with total_opens > 0: {(df_sends['total_opens'] > 0).sum()}")
-            print(f"[OPENS DEBUG] Sample assetId+contactId with total_opens: {df_sends[df_sends['total_opens'] > 0][['assetId_str', 'contactId_str', 'total_opens']].head(3).to_dict('records')}\n")
+            print(f"[OPENS DEBUG] Opens assigned to send that happened before the first open")
+            if 'firstOpenDate' in df_sends.columns and 'activityDateParsed' in df_sends.columns:
+                print(f"[OPENS DEBUG] Sample with opens: {df_sends[df_sends['total_opens'] > 0][['assetId_str', 'contactId_str', 'total_opens', 'activityDateParsed', 'firstOpenDate']].head(3).to_dict('records')}\n")
+            else:
+                print(f"[OPENS DEBUG] Sample with opens: {df_sends[df_sends['total_opens'] > 0][['assetId_str', 'contactId_str', 'total_opens']].head(3).to_dict('records')}\n")
             
             debug_print(f"[OPENS_MERGE_DEBUG] After merge, df_sends shape: {df_sends.shape}")
             debug_print(f"[OPENS_MERGE_DEBUG] total_opens column stats: min={df_sends['total_opens'].min()}, max={df_sends['total_opens'].max()}, null_count={df_sends['total_opens'].isna().sum()}")
@@ -949,8 +1065,14 @@ def generate_daily_report(target_date):
         # "emailSendType": "Email Send Type"
     }
     
+    print(f"\n[DEBUG] Before creating report: df_sends has {len(df_sends)} rows")
+    na34078_before_report = len(df_sends[df_sends['assetId'] == '18010'])
+    print(f"[DEBUG] NA_34078 before report: {na34078_before_report} rows")
+    
     df_report = df_sends.rename(columns=final_column_map)
     
+    print(f"[DEBUG] After creating report: df_report has {len(df_report)} rows")
+    print()
     final_columns_ordered = []
     for col_name in final_column_map.values():
         if col_name not in df_report.columns:

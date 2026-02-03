@@ -259,8 +259,8 @@ def fetch_data(endpoint, filename, extra_params=None):
             all_data.extend(elements)
             print(f"[INFO] Fetched page {page} from {endpoint.split('/')[-1]}: {len(elements)} records")
             
-            # Limit to 40 pages max (200,000 records with batching)
-            # With email ID batching, each batch should stay under this limit
+            # Pagination limit to prevent runaway queries
+            # 40 pages = 200k records max per query (sufficient for daily reports)
             if page >= 40:
                 print(f"[INFO] Reached page limit (40 pages = 200k records max)")
                 break

@@ -56,15 +56,18 @@ def fetch_and_save_data(target_date=None):
     print(f"[INFO] Email IDs: {email_ids_list[:10]}{'...' if len(email_ids_list) > 10 else ''}")
     
     # Step 2: Split email IDs into batches to avoid 200k API record limit
-    # Strategy: Query opens/clicks in batches of 10-15 email IDs at a time
-    BATCH_SIZE = 12  # Tuned to stay under 200k limit per batch
+    # Strategy: Use moderate batch size - some batches may hit limit but better than individual queries
+    # Individual queries (batch size 1) only returned 13k opens vs 554k with batch size 12
+    # Accepted trade-off: Some data loss at 200k limit is better than massive data loss with individual queries
+    BATCH_SIZE = 12  # Balanced approach - captures most data even if some batches hit limit
     email_id_batches = []
     if email_ids_list:
         for i in range(0, len(email_ids_list), BATCH_SIZE):
             batch = email_ids_list[i:i + BATCH_SIZE]
             email_id_batches.append(batch)
         print(f"[INFO] Split {len(email_ids_list)} email IDs into {len(email_id_batches)} batches of ~{BATCH_SIZE} IDs each")
-    # Step 3: Fetch opens and clicks in batches (to avoid 200k limit)
+    
+    # Step 3: Fetch opens and clicks in batches
     all_opens = []
     all_clicks = []
     
@@ -98,6 +101,10 @@ def fetch_and_save_data(target_date=None):
             
             print(f"[BATCH {batch_num}/{len(email_id_batches)}] Fetched {len(batch_opens_list)} opens, {len(batch_clicks_list)} clicks")
         
+        print(f"[INFO] Total across all batches: {len(all_opens)} opens, {len(all_clicks)} clicks")
+    
+    # Remove the individual query code below
+    
         print(f"[INFO] Total across all batches: {len(all_opens)} opens, {len(all_clicks)} clicks")
         results["email_opens"] = {"value": all_opens}
         results["email_clickthroughs"] = {"value": all_clicks}

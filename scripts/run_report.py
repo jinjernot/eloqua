@@ -52,9 +52,9 @@ if __name__ == "__main__":
             logging.error("Aborting report generation.")
             sys.exit(1)
         logging.info("S3 connectivity verified.")
-        print(f"✓ S3 bucket verified: {S3_BUCKET_NAME}/{S3_FOLDER_PATH}\n")
+        print(f"[OK] S3 bucket verified: {S3_BUCKET_NAME}/{S3_FOLDER_PATH}\n")
     else:
-        print("ℹ S3 upload disabled - saving locally only\n")
+        print("[INFO] S3 upload disabled - saving locally only\n")
     
     target_date_obj = datetime.utcnow().date() - timedelta(days=1)
     
@@ -69,7 +69,7 @@ if __name__ == "__main__":
     day_name = target_date_obj.strftime('%A')
 
     print(f"Target date: {target_date_str} ({day_name})")
-    print(f"{'─'*80}\n")
+    print(f"{'-'*80}\n")
     
     try:
         import time
