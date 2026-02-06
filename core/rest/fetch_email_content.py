@@ -12,13 +12,23 @@ logger = logging.getLogger(__name__)
 
 def sanitize_filename(filename):
     """
-    Removes invalid characters from a string to make it a safe filename.
+    Sanitizes filename by replacing Windows-problematic characters.
+    More gentle approach that preserves readability.
     """
     if not filename:
         return "untitled"
-    safe_name = re.sub(r'[\\/*?:"<>|]', "", filename)
-    safe_name = safe_name.replace(" ", "_")
-    return safe_name[:100]
+    # Replace problematic characters with safe alternatives
+    safe_name = filename.replace('/', '_')
+    safe_name = safe_name.replace(':', '-')
+    safe_name = safe_name.replace('|', '-')
+    safe_name = safe_name.replace('\\', '_')
+    safe_name = safe_name.replace('*', '_')
+    safe_name = safe_name.replace('?', '_')
+    safe_name = safe_name.replace('"', "'")
+    safe_name = safe_name.replace('<', '_')
+    safe_name = safe_name.replace('>', '_')
+    # Limit length to avoid path issues (keep room for _emailid.html)
+    return safe_name[:200]
 
 def fetch_email_html(email_id, save_dir="email_downloads"):
     """
