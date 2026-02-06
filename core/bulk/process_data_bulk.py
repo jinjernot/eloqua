@@ -339,20 +339,41 @@ def generate_daily_report(target_date):
                 logger.warning(f"No emailID column in clicks. Available: {df_clicks.columns.tolist()}")
                 df_clicks["assetId_str"] = ""
             
-            click_key = ["assetId_str", "contactId_str"]
+            # Parse sentDateHour to match clicks to specific sends (critical for duplicate sends)
+            # OData clicks include sentDateHour showing when the email was originally sent
+            if "sentDateHour" in df_clicks.columns:
+                # Parse sentDateHour keeping local timezone (don't convert to UTC)
+                # sentDateHour format: "2026-01-13T02:00:00-05:00" → keep "2026-01-13 02:00:00" (local time)
+                # This matches activityDate which is also in local time without timezone
+                df_clicks['sentDateParsed'] = df_clicks['sentDateHour'].apply(
+                    lambda x: pd.to_datetime(str(x)[:19], errors='coerce') if pd.notna(x) else pd.NaT
+                )
+                # Round to nearest hour to handle minor timestamp differences
+                df_clicks['sentDateRounded'] = df_clicks['sentDateParsed'].dt.round('H')
+                click_key = ["assetId_str", "contactId_str", "sentDateRounded"]
+                logger.info(f"[CLICKS] Using sentDateHour matching for accurate attribution to specific sends")
+            else:
+                click_key = ["assetId_str", "contactId_str"]
+                logger.warning(f"[CLICKS] sentDateHour not available, using basic matching (may misattribute duplicate sends)")
+            
             df_click_counts = df_clicks.groupby(click_key).size().to_frame("total_clicks").reset_index()
             
-            df_sends = df_sends.merge(df_click_counts, on=click_key, how="left")
-            
-            # Assign activity to LAST (most recent) send for each contact+email
-            # When email sent multiple times, user typically responds to the latest one
-            # Sort by activityDateParsed first to ensure 'last' means most recent by time
-            df_sends = df_sends.sort_values('activityDateParsed', ascending=True)
-            df_sends['is_last_send'] = ~df_sends.duplicated(subset=['assetId_str', 'contactId_str'], keep='last')
-            
-            # Zero out activity for all except the last send
-            df_sends.loc[~df_sends['is_last_send'], 'total_clicks'] = 0
-            logging.info(f"[CLICKS DEBUG] Activity assigned to LAST send only (by activityDateParsed)")
+            # Prepare sends data with rounded timestamp for matching
+            if "sentDateRounded" in df_click_counts.columns:
+                df_sends['activityDateRounded'] = pd.to_datetime(df_sends['activityDate'], errors='coerce', utc=True).dt.tz_localize(None).dt.round('H')
+                df_sends = df_sends.merge(df_click_counts, 
+                                         left_on=["assetId_str", "contactId_str", "activityDateRounded"],
+                                         right_on=["assetId_str", "contactId_str", "sentDateRounded"],
+                                         how="left")
+                logger.info(f"[CLICKS] Merged using sentDateHour - clicks attributed to correct send by timestamp")
+            else:
+                # Fallback to old method if sentDateHour not available
+                df_sends = df_sends.merge(df_click_counts, on=click_key, how="left")
+                # Assign activity to LAST (most recent) send for each contact+email
+                df_sends = df_sends.sort_values('activityDateParsed', ascending=True)
+                df_sends['is_last_send'] = ~df_sends.duplicated(subset=['assetId_str', 'contactId_str'], keep='last')
+                df_sends.loc[~df_sends['is_last_send'], 'total_clicks'] = 0
+                logger.info(f"[CLICKS] Using fallback: Activity assigned to LAST send only")
             
             debug_print(f"[PERF_DEBUG] Step 4: CLICKS DataFrame merged in {time.time() - pd_step_start:.2f}s.")
         else:
@@ -386,6 +407,37 @@ def generate_daily_report(target_date):
             
             df_opens["emailAddress"] = df_opens.get("emailAddress", "")
             
+            # DEBUG: Check what columns are actually in the opens data
+            print(f"\n[SENTDATE DEBUG] ==========================================")
+            print(f"[SENTDATE DEBUG] Opens DataFrame columns: {df_opens.columns.tolist()}")
+            print(f"[SENTDATE DEBUG] sentDateHour in columns: {'sentDateHour' in df_opens.columns}")
+            if 'sentDateHour' in df_opens.columns:
+                print(f"[SENTDATE DEBUG] Sample sentDateHour values: {df_opens['sentDateHour'].head(3).tolist()}")
+            print(f"[SENTDATE DEBUG] ==========================================\n")
+            
+            # Parse sentDateHour to match opens to specific sends (critical for duplicate sends)
+            # OData opens include sentDateHour showing when the email was originally sent
+            # This enables precise attribution matching Eloqua's manual export methodology
+            if "sentDateHour" in df_opens.columns:
+                print(f"[SENTDATE DEBUG] Parsing sentDateHour for matching...")
+                # Parse sentDateHour keeping local timezone (don't convert to UTC)
+                # sentDateHour format: "2026-01-13T02:00:00-05:00" → parse first 19 chars to get "2026-01-13 02:00:00"
+                # This matches activityDate which is also in local time without timezone
+                df_opens['sentDateParsed'] = df_opens['sentDateHour'].apply(
+                    lambda x: pd.to_datetime(str(x)[:19], errors='coerce') if pd.notna(x) else pd.NaT
+                )
+                # Round to nearest hour to handle minor timestamp differences
+                df_opens['sentDateRounded'] = df_opens['sentDateParsed'].dt.round('H')
+                open_key = ["assetId_str", "contactId_str", "sentDateRounded"]
+                print(f"[SENTDATE DEBUG] Using 3-key merge: {open_key}")
+                print(f"[SENTDATE DEBUG] Sample sentDateParsed (local): {df_opens['sentDateParsed'].head(3).tolist()}")
+                print(f"[SENTDATE DEBUG] Sample sentDateRounded: {df_opens['sentDateRounded'].head(3).tolist()}")
+                logger.info(f"[OPENS] Using sentDateHour matching for accurate attribution to specific sends")
+            else:
+                open_key = ["assetId_str", "contactId_str"]
+                print(f"[SENTDATE DEBUG] sentDateHour NOT FOUND - using 2-key merge")
+                logger.warning(f"[OPENS] sentDateHour not available, using basic matching (may misattribute duplicate sends)")
+            
             # DIAGNOSTIC: Analyze what email IDs are in opens vs sends
             opens_email_ids = set(df_opens['assetId_str'].unique())
             sends_email_ids = set(df_sends['assetId_str'].unique())
@@ -411,9 +463,7 @@ def generate_daily_report(target_date):
             debug_print(f"[OPENS_MERGE_DEBUG] df_opens sample assetId_str: {df_opens['assetId_str'].head(3).tolist()}")
             debug_print(f"[OPENS_MERGE_DEBUG] df_sends sample assetId_str: {df_sends['assetId_str'].head(3).tolist()}")
             
-            open_key = ["assetId_str", "contactId_str"]
-            # Keep the earliest open timestamp to match with the correct send
-            # Group by assetId+contactId and get total opens + first open timestamp
+            # Group by merge key (includes sentDateRounded if available) and get total opens + first open timestamp
             df_open_agg = df_opens.groupby(open_key).agg({
                 'openDateHour': 'min',  # Get earliest open timestamp
             }).reset_index()
@@ -460,52 +510,66 @@ def generate_daily_report(target_date):
                             f.write(f"  NO MATCHING OPEN\n")
             print(f"[DEBUG] Saved merge debug info to {debug_sample_file}")
             
-            df_sends = df_sends.merge(df_open_agg, on=open_key, how="left")
-            
-            # Assign opens to the send that happened IMMEDIATELY BEFORE the first open
-            # For duplicate sends, we need to match the open to whichever send it actually responded to
-            # Sort by activityDateParsed to ensure chronological order
-            df_sends = df_sends.sort_values(['assetId_str', 'contactId_str', 'activityDateParsed'], ascending=True)
-            
-            # For contacts with opens, find which send the open belongs to
-            # The open belongs to the send that happened right before it (not necessarily the last send)
-            def assign_opens_to_correct_send(group):
-                if group['total_opens'].isna().all() or (group['total_opens'] == 0).all():
-                    # No opens for this contact+email, nothing to do
+            # Merge opens with sends using sentDateHour matching if available
+            if "sentDateRounded" in df_open_agg.columns:
+                # Prepare sends data with rounded timestamp for matching
+                if 'activityDateRounded' not in df_sends.columns:
+                    df_sends['activityDateRounded'] = pd.to_datetime(df_sends['activityDate'], errors='coerce', utc=True).dt.tz_localize(None).dt.round('H')
+                
+                df_sends = df_sends.merge(df_open_agg,
+                                         left_on=["assetId_str", "contactId_str", "activityDateRounded"],
+                                         right_on=["assetId_str", "contactId_str", "sentDateRounded"],
+                                         how="left")
+                logger.info(f"[OPENS] Merged using sentDateHour - opens attributed to correct send by timestamp")
+                logger.info(f"[OPENS] This matches Eloqua manual export methodology for duplicate sends")
+            else:
+                # Fallback to old method if sentDateHour not available
+                df_sends = df_sends.merge(df_open_agg, on=open_key, how="left")
+                
+                # Assign opens to the send that happened IMMEDIATELY BEFORE the first open
+                # For duplicate sends, we need to match the open to whichever send it actually responded to
+                # Sort by activityDateParsed to ensure chronological order
+                df_sends = df_sends.sort_values(['assetId_str', 'contactId_str', 'activityDateParsed'], ascending=True)
+                
+                # For contacts with opens, find which send the open belongs to
+                # The open belongs to the send that happened right before it (not necessarily the last send)
+                def assign_opens_to_correct_send(group):
+                    if group['total_opens'].isna().all() or (group['total_opens'] == 0).all():
+                        # No opens for this contact+email, nothing to do
+                        return group
+                    
+                    # Get the first open timestamp
+                    first_open = group['firstOpenDate'].iloc[0]
+                    if pd.isna(first_open):
+                        # No valid open date, fall back to last send
+                        group['is_open_send'] = False
+                        group.iloc[-1, group.columns.get_loc('is_open_send')] = True
+                        return group
+                    
+                    # Find the send that happened right before the first open
+                    # Filter sends that happened before the open
+                    sends_before_open = group[group['activityDateParsed'] <= first_open]
+                    
+                    if len(sends_before_open) > 0:
+                        # Assign opens to the most recent send before the open
+                        group['is_open_send'] = False
+                        last_send_before_open_idx = sends_before_open.index[-1]
+                        group.loc[last_send_before_open_idx, 'is_open_send'] = True
+                    else:
+                        # Open happened before any recorded send (edge case) - assign to first send
+                        group['is_open_send'] = False
+                        group.iloc[0, group.columns.get_loc('is_open_send')] = True
+                    
                     return group
                 
-                # Get the first open timestamp
-                first_open = group['firstOpenDate'].iloc[0]
-                if pd.isna(first_open):
-                    # No valid open date, fall back to last send
-                    group['is_open_send'] = False
-                    group.iloc[-1, group.columns.get_loc('is_open_send')] = True
-                    return group
+                # Apply the logic to each contact+email group
+                df_sends = df_sends.groupby(['assetId_str', 'contactId_str'], group_keys=False).apply(assign_opens_to_correct_send)
                 
-                # Find the send that happened right before the first open
-                # Filter sends that happened before the open
-                sends_before_open = group[group['activityDateParsed'] <= first_open]
+                # Zero out opens for sends that didn't trigger the open
+                df_sends['is_open_send'] = df_sends['is_open_send'].fillna(False)
+                df_sends.loc[~df_sends['is_open_send'], 'total_opens'] = 0
                 
-                if len(sends_before_open) > 0:
-                    # Assign opens to the most recent send before the open
-                    group['is_open_send'] = False
-                    last_send_before_open_idx = sends_before_open.index[-1]
-                    group.loc[last_send_before_open_idx, 'is_open_send'] = True
-                else:
-                    # Open happened before any recorded send (edge case) - assign to first send
-                    group['is_open_send'] = False
-                    group.iloc[0, group.columns.get_loc('is_open_send')] = True
-                
-                return group
-            
-            # Apply the logic to each contact+email group
-            df_sends = df_sends.groupby(['assetId_str', 'contactId_str'], group_keys=False).apply(assign_opens_to_correct_send)
-            
-            # Zero out opens for sends that didn't trigger the open
-            df_sends['is_open_send'] = df_sends['is_open_send'].fillna(False)
-            df_sends.loc[~df_sends['is_open_send'], 'total_opens'] = 0
-            
-            logging.info(f"[OPENS DEBUG] Activity assigned to send IMMEDIATELY BEFORE first open (by timestamp matching)")
+                logger.info(f"[OPENS] Using fallback: Activity assigned to send IMMEDIATELY BEFORE first open")
             
             print(f"[OPENS DEBUG] After merge, total_opens: min={df_sends['total_opens'].min()}, max={df_sends['total_opens'].max()}, nulls={df_sends['total_opens'].isna().sum()}")
             print(f"[OPENS DEBUG] Rows with total_opens > 0: {(df_sends['total_opens'] > 0).sum()}")

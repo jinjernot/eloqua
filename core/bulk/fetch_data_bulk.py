@@ -73,15 +73,21 @@ def fetch_and_save_data(target_date=None):
     
     if email_id_batches:
         print(f"[INFO] Fetching opens/clicks for {len(email_id_batches)} batches...")
+        print(f"[INFO] Using sentDateHour filter to capture all activity for emails sent on {start_str}")
         for batch_num, batch in enumerate(email_id_batches, 1):
             email_ids_str = ",".join(batch)
+            # CRITICAL FIX: Filter by sentDateHour (when email was sent) not openDateHour (when opened)
+            # This ensures we capture ALL opens/clicks for emails sent on target date, regardless of when activity occurred
+            # The sentDateHour field in OData shows the original send timestamp
+            # Upper bound: Use engagement window (366 days) to capture late opens/clicks but filter by send date
+            # This fixes: Opens before Jan 24 missing, because we now correctly identify which report they belong to
             opens_filter = (
                 f"emailID in ({email_ids_str}) and "
-                f"openDateHour ge {start_str} and openDateHour lt {end_str_engagement}"
+                f"sentDateHour ge {start_str} and sentDateHour lt {end_str}"
             )
             clicks_filter = (
                 f"emailID in ({email_ids_str}) and "
-                f"clickDateHour ge {start_str} and clickDateHour lt {end_str_engagement}"
+                f"sentDateHour ge {start_str} and sentDateHour lt {end_str}"
             )
             opens_orderby = "openDateHour asc"
             clicks_orderby = "clickDateHour asc"
