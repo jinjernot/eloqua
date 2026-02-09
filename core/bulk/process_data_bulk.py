@@ -348,8 +348,8 @@ def generate_daily_report(target_date):
                 df_clicks['sentDateParsed'] = df_clicks['sentDateHour'].apply(
                     lambda x: pd.to_datetime(str(x)[:19], errors='coerce') if pd.notna(x) else pd.NaT
                 )
-                # Round to nearest hour to handle minor timestamp differences
-                df_clicks['sentDateRounded'] = df_clicks['sentDateParsed'].dt.round('H')
+                # Floor (truncate) to hour to match Eloqua's sentDateHour rounding behavior (rounds DOWN not nearest)
+                df_clicks['sentDateRounded'] = df_clicks['sentDateParsed'].dt.floor('H')
                 click_key = ["assetId_str", "contactId_str", "sentDateRounded"]
                 logger.info(f"[CLICKS] Using sentDateHour matching for accurate attribution to specific sends")
             else:
@@ -360,7 +360,8 @@ def generate_daily_report(target_date):
             
             # Prepare sends data with rounded timestamp for matching
             if "sentDateRounded" in df_click_counts.columns:
-                df_sends['activityDateRounded'] = pd.to_datetime(df_sends['activityDate'], errors='coerce', utc=True).dt.tz_localize(None).dt.round('H')
+                # Parse activityDate and floor (truncate) to hour to match Eloqua's sentDateHour
+                df_sends['activityDateRounded'] = pd.to_datetime(df_sends['activityDate'], errors='coerce').dt.floor('H')
                 df_sends = df_sends.merge(df_click_counts, 
                                          left_on=["assetId_str", "contactId_str", "activityDateRounded"],
                                          right_on=["assetId_str", "contactId_str", "sentDateRounded"],
@@ -426,8 +427,8 @@ def generate_daily_report(target_date):
                 df_opens['sentDateParsed'] = df_opens['sentDateHour'].apply(
                     lambda x: pd.to_datetime(str(x)[:19], errors='coerce') if pd.notna(x) else pd.NaT
                 )
-                # Round to nearest hour to handle minor timestamp differences
-                df_opens['sentDateRounded'] = df_opens['sentDateParsed'].dt.round('H')
+                # Floor (truncate) to hour to match Eloqua's sentDateHour rounding behavior (rounds DOWN not nearest)
+                df_opens['sentDateRounded'] = df_opens['sentDateParsed'].dt.floor('H')
                 open_key = ["assetId_str", "contactId_str", "sentDateRounded"]
                 print(f"[SENTDATE DEBUG] Using 3-key merge: {open_key}")
                 print(f"[SENTDATE DEBUG] Sample sentDateParsed (local): {df_opens['sentDateParsed'].head(3).tolist()}")
@@ -514,7 +515,8 @@ def generate_daily_report(target_date):
             if "sentDateRounded" in df_open_agg.columns:
                 # Prepare sends data with rounded timestamp for matching
                 if 'activityDateRounded' not in df_sends.columns:
-                    df_sends['activityDateRounded'] = pd.to_datetime(df_sends['activityDate'], errors='coerce', utc=True).dt.tz_localize(None).dt.round('H')
+                    # Parse activityDate and floor (truncate) to hour to match Eloqua's sentDateHour
+                    df_sends['activityDateRounded'] = pd.to_datetime(df_sends['activityDate'], errors='coerce').dt.floor('H')
                 
                 df_sends = df_sends.merge(df_open_agg,
                                          left_on=["assetId_str", "contactId_str", "activityDateRounded"],
