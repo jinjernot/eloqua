@@ -63,8 +63,8 @@ def sanitize_dataframe_for_csv(df):
             df[col] = (df[col].astype(str)
                       .str.replace('\t', ' ', regex=False)  # Replace tabs with spaces
                       .str.replace('\n', ' ', regex=False)
-                      .str.replace('\r', ' ', regex=False)
-                      .str.strip())
+                      .str.replace('\r', ' ', regex=False))
+                      # .str.strip())  # Commented out to match manual report exactly - may re-enable for prod
         elif pd.api.types.is_float_dtype(df[col]):
             df[col] = df[col].fillna(0).astype(int)
     return df
@@ -134,30 +134,88 @@ def generate_daily_report(target_date):
     contact_cache = load_contact_cache()
     logger.info(f"Loaded {len(contact_cache)} contacts from cache for email case restoration")
     
-    # Create contact lookup from email_sends for forwarded emails
+    # Create contact lookup from email_sends
     contact_lookup = {}
+    contacts_not_in_cache = []
     debug_sample_count = 0
+    
     for send in email_sends:
         cid = str(send.get("contactId", ""))
         if cid and cid not in contact_lookup:
             # Get proper-cased email from cache if available
             cached_contact = contact_cache.get(cid, {})
-            bulk_email = send.get("emailAddress", "")
-            proper_cased_email = cached_contact.get("emailAddress", bulk_email)
             
-            # Debug: Print first 3 cases where we restored case
-            if debug_sample_count < 3 and proper_cased_email != bulk_email:
-                debug_print(f"[DEBUG] Contact {cid}: Bulk='{bulk_email}' → Cache='{proper_cased_email}'")
-                debug_sample_count += 1
+            if cached_contact:
+                # Contact is in cache - use cached data
+                bulk_email = send.get("emailAddress", "")
+                proper_cased_email = cached_contact.get("emailAddress", bulk_email)
+                
+                # Debug: Print first 3 cases where we restored case
+                if debug_sample_count < 3 and proper_cased_email != bulk_email:
+                    debug_print(f"[DEBUG] Contact {cid}: Bulk='{bulk_email}' → Cache='{proper_cased_email}'")
+                    debug_sample_count += 1
+                
+                contact_lookup[cid] = {
+                    "emailAddress": proper_cased_email,  # Use cached email (proper case) if available
+                    "contact_country": cached_contact.get("country", ""),  # Use standard country field from cache
+                    "contact_hp_role": cached_contact.get("hp_role", ""),
+                    "contact_hp_partner_id": cached_contact.get("hp_partner_id", ""),
+                    "contact_partner_name": cached_contact.get("partner_name", ""),
+                    "contact_market": cached_contact.get("market", "")
+                }
+            else:
+                # Contact not in cache - will fetch later
+                contacts_not_in_cache.append(cid)
+                # Add placeholder with data from bulk export
+                contact_lookup[cid] = {
+                    "emailAddress": send.get("emailAddress", ""),
+                    "contact_country": "",  # Will be filled from API fetch
+                    "contact_hp_role": send.get("contact_hp_role", ""),
+                    "contact_hp_partner_id": send.get("contact_hp_partner_id", ""),
+                    "contact_partner_name": send.get("contact_partner_name", ""),
+                    "contact_market": send.get("contact_market", "")
+                }
+    
+    logger.info(f"Built contact_lookup with {len(contact_lookup)} contacts ({len(contacts_not_in_cache)} not in cache)")
+    
+    # Fetch missing contacts from Eloqua API
+    if contacts_not_in_cache:
+        logger.info(f"Fetching {len(contacts_not_in_cache)} missing contacts from Eloqua API...")
+        try:
+            # Fetch contacts in batch
+            fetched_contacts = fetch_contacts_batch(contacts_not_in_cache, max_workers=10, use_cache=False)
             
-            contact_lookup[cid] = {
-                "emailAddress": proper_cased_email,  # Use cached email (proper case) if available
-                "contact_country": clean_country_name(send.get("contact_country", "")),
-                "contact_hp_role": send.get("contact_hp_role", ""),
-                "contact_hp_partner_id": send.get("contact_hp_partner_id", ""),
-                "contact_partner_name": send.get("contact_partner_name", ""),
-                "contact_market": send.get("contact_market", "")
-            }
+            if fetched_contacts:
+                logger.info(f"Successfully fetched {len(fetched_contacts)} contacts from API")
+                
+                # Update contact_lookup with fetched data
+                for contact_id, contact_data in fetched_contacts.items():
+                    if contact_id in contact_lookup:
+                        # Update the country field (keep other fields from bulk export)
+                        contact_lookup[contact_id]["contact_country"] = contact_data.get("country", "")
+                        contact_lookup[contact_id]["emailAddress"] = contact_data.get("emailAddress", contact_lookup[contact_id]["emailAddress"])
+                        # Update other fields if they were empty
+                        if not contact_lookup[contact_id]["contact_hp_role"]:
+                            contact_lookup[contact_id]["contact_hp_role"] = contact_data.get("hp_role", "")
+                        if not contact_lookup[contact_id]["contact_hp_partner_id"]:
+                            contact_lookup[contact_id]["contact_hp_partner_id"] = contact_data.get("hp_partner_id", "")
+                        if not contact_lookup[contact_id]["contact_partner_name"]:
+                            contact_lookup[contact_id]["contact_partner_name"] = contact_data.get("partner_name", "")
+                        if not contact_lookup[contact_id]["contact_market"]:
+                            contact_lookup[contact_id]["contact_market"] = contact_data.get("market", "")
+                    
+                    # Also add to cache for future use
+                    contact_cache[contact_id] = contact_data
+                
+                # Save updated cache
+                logger.info(f"Saving updated cache with {len(fetched_contacts)} new contacts...")
+                save_contact_cache(contact_cache)
+                logger.info(f"Cache saved successfully")
+            else:
+                logger.warning(f"No contacts returned from API")
+                
+        except Exception as e:
+            logger.warning(f"Failed to fetch missing contacts: {e}")
     
     debug_print(f"[PERF_DEBUG] Step 1: Helper maps created ({len(contact_lookup)} contacts) in {time.time() - pd_step_start:.2f}s.")
 
@@ -174,34 +232,39 @@ def generate_daily_report(target_date):
     if excluded_no_campaign > 0:
         logger.info(f"Excluded {excluded_no_campaign} sends without campaignId (non-standard eComm data)")
     
-    unique_sends_dict = {}
+    # CRITICAL FIX: Use list-based deduplication to preserve legitimate duplicate sends
+    # Problem: Dictionary-based dedup was removing duplicate sends when keys collided
+    # Solution: Only remove EXACT duplicates (all fields identical)
+    seen_sends = []
+    unique_sends_list = []
     na34078_debug = []
+    
     for s in email_sends_filtered:
-        # Use externalId as unique identifier - this is Eloqua's unique activity ID
-        # Each send activity has a unique externalId even if same contact/asset/time
-        # If externalId is missing, fall back to compound key with activityDate
-        external_id = s.get("externalId")
-        
         # Debug NA_34078 (email ID 18010)
         if str(s.get("assetId")) == "18010":
             na34078_debug.append({
                 'contactId': s.get("contactId"),
-                'externalId': external_id,
+                'externalId': s.get("externalId"),
                 'activityDate': s.get("activityDate"),
                 'emailAddress': s.get("emailAddress")
             })
         
-        if external_id:
-            key = str(external_id)
-        else:
-            # Fallback: Include activityDate in key to preserve multiple sends to same contact on same day
-            key = (
-                str(s.get("assetId")), 
-                str(s.get("contactId")),
-                str(s.get("emailSendType")),
-                str(s.get("activityDate"))
-            )
-        unique_sends_dict[key] = s
+        # Create a signature for exact duplicate detection
+        # Include ALL relevant fields to ensure only TRUE duplicates are removed
+        signature = (
+            str(s.get("externalId")),
+            str(s.get("assetId")),
+            str(s.get("contactId")),
+            str(s.get("activityDate")),
+            str(s.get("emailSendType")),
+            str(s.get("deploymentId")),
+            str(s.get("emailAddress"))
+        )
+        
+        # Only skip if we've seen this EXACT send before
+        if signature not in seen_sends:
+            seen_sends.append(signature)
+            unique_sends_list.append(s)
     
     # Debug output for NA_34078
     if len(na34078_debug) > 0:
@@ -228,11 +291,11 @@ def generate_daily_report(target_date):
                     print(f"    - {send['activityDate']} | externalId={send['externalId']}")
         print()
 
-    print(f"[DEBUG] unique_sends_dict has {len(unique_sends_dict)} unique keys (was {len(email_sends_filtered)} before dedup)")
-    na34078_in_dict = sum(1 for v in unique_sends_dict.values() if str(v.get('assetId')) == '18010')
-    print(f"[DEBUG] NA_34078 in dict: {na34078_in_dict} rows (was 1812 before)")
+    print(f"[DEBUG] Deduplication complete: {len(unique_sends_list)} unique sends (was {len(email_sends_filtered)} before dedup)")
+    na34078_after_dedup = sum(1 for s in unique_sends_list if str(s.get('assetId')) == '18010')
+    print(f"[DEBUG] NA_34078 after dedup: {na34078_after_dedup} rows")
     
-    df_sends = pd.DataFrame(list(unique_sends_dict.values()))
+    df_sends = pd.DataFrame(unique_sends_list)
     
     print(f"[DEBUG] After DataFrame creation: df_sends has {len(df_sends)} rows")
     na34078_after_dedup = len(df_sends[df_sends['assetId'] == '18010'])
@@ -698,7 +761,7 @@ def generate_daily_report(target_date):
                     cached_contact = contact_cache[contact_id]
                     contact_lookup[contact_id] = {
                         "emailAddress": cached_contact.get("emailAddress", ""),
-                        "contact_country": clean_country_name(cached_contact.get("country", "")),
+                        "contact_country": cached_contact.get("country", ""),  # Standard country field - no cleaning needed
                         "contact_hp_role": cached_contact.get("hp_role", ""),
                         "contact_hp_partner_id": cached_contact.get("hp_partner_id", ""),
                         "contact_partner_name": cached_contact.get("partner_name", ""),
@@ -725,7 +788,7 @@ def generate_daily_report(target_date):
                     for contact_id, contact_data in fetched_contacts.items():
                         contact_lookup[contact_id] = {
                             "emailAddress": contact_data.get("emailAddress", ""),
-                            "contact_country": clean_country_name(contact_data.get("country", "")),
+                            "contact_country": contact_data.get("country", ""),  # Standard country field - no cleaning needed
                             "contact_hp_role": contact_data.get("hp_role", ""),
                             "contact_hp_partner_id": contact_data.get("hp_partner_id", ""),
                             "contact_partner_name": contact_data.get("partner_name", ""),
@@ -1025,21 +1088,26 @@ def generate_daily_report(target_date):
     debug_print(f"[FILTER_DEBUG] Removed {removed_forwards} forwards from campaigns without valid sends")
     debug_print(f"[FILTER_DEBUG] Forwards remaining: {forwards_before - removed_forwards}")
 
-    # Restore proper email case from contact_lookup (Bulk API returns lowercase, but we want original case)
-    def get_proper_cased_email(contact_id, lowercase_email):
-        """Get the proper-cased email from contact_lookup, fallback to lowercase if not found"""
+    # Add contact data from contact_lookup to df_sends
+    def get_contact_field(contact_id, field_name):
+        """Get a contact field from contact_lookup"""
         contact = contact_lookup.get(str(contact_id), {})
-        cached_email = contact.get("emailAddress", "")
-        # Only use cached email if it matches (case-insensitive)
-        if cached_email and cached_email.lower() == lowercase_email.lower():
-            return cached_email
-        return lowercase_email
+        return contact.get(field_name, "")
     
+    # Restore proper email case from contact_lookup (Bulk API returns lowercase, but we want original case)
     df_sends["emailAddress"] = df_sends.apply(
-        lambda row: get_proper_cased_email(row["contactId_str"], row["emailAddress"]),
+        lambda row: get_contact_field(row["contactId_str"], "emailAddress") or row["emailAddress"],
         axis=1
     )
     debug_print(f"[PERF_DEBUG] Restored proper email case from contact lookup.")
+    
+    # Add contact country and other fields from contact_lookup
+    df_sends["contact_country"] = df_sends["contactId_str"].apply(lambda cid: get_contact_field(cid, "contact_country"))
+    df_sends["contact_hp_role"] = df_sends["contactId_str"].apply(lambda cid: get_contact_field(cid, "contact_hp_role"))
+    df_sends["contact_hp_partner_id"] = df_sends["contactId_str"].apply(lambda cid: get_contact_field(cid, "contact_hp_partner_id"))
+    df_sends["contact_partner_name"] = df_sends["contactId_str"].apply(lambda cid: get_contact_field(cid, "contact_partner_name"))
+    df_sends["contact_market"] = df_sends["contactId_str"].apply(lambda cid: get_contact_field(cid, "contact_market"))
+    debug_print(f"[PERF_DEBUG] Added contact data from contact_lookup.")
 
     df_sends["Email Group"] = df_sends["assetId_int"].map(email_group_map).fillna("")
     
@@ -1148,10 +1216,25 @@ def generate_daily_report(target_date):
     df_report = df_report[final_columns_ordered]
     
     # Format Email Send Date - it's already a datetime, just needs formatting
+    # Using 24-hour format to match Eloqua's native export format
     if not df_report.empty and pd.api.types.is_datetime64_any_dtype(df_report["Email Send Date"]):
-        df_report["Email Send Date"] = df_report["Email Send Date"].dt.strftime("%Y-%m-%d %I:%M:%S %p")
+        df_report["Email Send Date"] = df_report["Email Send Date"].dt.strftime("%Y-%m-%d %H:%M:%S")
     # Convert to string first to avoid .str accessor errors
-    df_report["Email Address"] = df_report["Email Address"].astype(str).str.lower()
+    df_report["Email Address"] = df_report["Email Address"].astype(str)
+    
+    # Replace zeros with blank strings to match Eloqua's native export format
+    # Eloqua exports zero values as blank for these specific numeric columns
+    zero_to_blank_columns = [
+        "Total Hard Bouncebacks",
+        "Total Soft Bouncebacks", 
+        "Total Bouncebacks",
+        "Total Delivered",
+        "Total Sends"
+    ]
+    for col in zero_to_blank_columns:
+        if col in df_report.columns:
+            df_report[col] = df_report[col].replace(0, '')
+    
     debug_print(f"[PERF_DEBUG] Step 8: Final column renaming and formatting in {time.time() - pd_step_start:.2f}s.")
     
     processing_end_time = time.time()

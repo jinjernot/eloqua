@@ -7,7 +7,7 @@ from core.aws.auth import get_valid_access_token
 from core.utils import save_json
 from config import *
 
-DEBUG_MODE = False
+DEBUG_MODE = True  # Enable to save raw API responses for investigation
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -43,7 +43,7 @@ def fetch_activity_export(activity_type, start_date, end_date, headers, activity
         "emailSendType": "{{Activity.Type}}",
         "deploymentId": "{{Activity.Field(EmailDeploymentId)}}",
         "externalId": "{{Activity.ExternalId}}",
-        "contact_country": "{{Activity.Contact.Field(C_Country)}}",
+        # Note: contact_country removed - will be fetched via Contacts API (standard field not accessible in Activity export)
         "contact_hp_role": "{{Activity.Contact.Field(C_HP_Role1)}}",
         "contact_hp_partner_id": "{{Activity.Contact.Field(C_HP_PartnerID1)}}",
         "contact_partner_name": "{{Activity.Contact.Field(C_Partner_Name1)}}",

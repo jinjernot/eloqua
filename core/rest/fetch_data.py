@@ -100,7 +100,7 @@ def fetch_contact_by_id(contact_id):
             # Extract the contact fields we need
             contact_info = {
                 "emailAddress": data.get("emailAddress", ""),
-                "country": "",
+                "country": data.get("country", ""),  # Get standard country field from root level
                 "hp_role": "",
                 "hp_partner_id": "",
                 "partner_name": "",
@@ -110,7 +110,7 @@ def fetch_contact_by_id(contact_id):
             # Parse field values from the contact - map by field ID
             # Confirmed field IDs from Eloqua instance:
             # 100195 = C_Market1
-            # 100196 = C_Country (likely based on position)
+            # 100196 = C_Country (DO NOT USE - contains HP regions, use root level country instead)
             # 100197 = C_Partner_Name1
             # 100198 = C_HP_PartnerID1
             # 100199 = C_HP_Role1
@@ -120,9 +120,9 @@ def fetch_contact_by_id(contact_id):
                 field_id = str(field.get("id", ""))
                 
                 if field_value:  # Only map if there's a value
-                    if field_id == "100196":  # C_Country
-                        contact_info["country"] = field_value
-                    elif field_id == "100199":  # C_HP_Role1
+                    # NOTE: Skip field 100196 (C_Country) - it contains HP regions like "HP ECG"
+                    # We use the root level country field instead which has actual country names
+                    if field_id == "100199":  # C_HP_Role1
                         contact_info["hp_role"] = field_value
                     elif field_id == "100198":  # C_HP_PartnerID1
                         contact_info["hp_partner_id"] = field_value
