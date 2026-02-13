@@ -1,6 +1,6 @@
 import sys
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 # Add parent directory to path to import core and config modules
@@ -56,7 +56,7 @@ if __name__ == "__main__":
     else:
         print("[INFO] S3 upload disabled - saving locally only\n")
     
-    target_date_obj = datetime.utcnow().date() - timedelta(days=1)
+    target_date_obj = datetime.now(timezone.utc).date() - timedelta(days=1)
     
     if len(sys.argv) > 1:
         try:

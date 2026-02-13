@@ -8,7 +8,7 @@ import os
 import csv
 import traceback
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Add parent directory to path to import core and config modules
@@ -187,7 +187,7 @@ def run_weekly_reports_parallel(max_workers=None):
         print("ℹ S3 upload disabled - saving locally only\n")
     
     # Calculate date range (last 7 days, ending yesterday)
-    end_date = datetime.utcnow().date() - timedelta(days=1)  # Yesterday
+    end_date = datetime.now(timezone.utc).date() - timedelta(days=1)  # Yesterday
     start_date = end_date - timedelta(days=num_days - 1)
     
     print(f"Date range: {start_date} to {end_date}")

@@ -11,6 +11,28 @@ DEBUG_MODE = True  # Enable to save raw API responses for investigation
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# HTTP Session for connection reuse - significantly improves performance
+_http_session = None
+
+def get_http_session():
+    """
+    Get or create a shared requests.Session for connection pooling.
+    Reusing connections reduces TCP handshake overhead and speeds up API calls.
+    """
+    global _http_session
+    if _http_session is None:
+        _http_session = requests.Session()
+        # Configure session for better performance
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=50,
+            max_retries=3,
+            pool_block=False
+        )
+        _http_session.mount('http://', adapter)
+        _http_session.mount('https://', adapter)
+    return _http_session
+
 def save_debug_payload(payload, filename, debug_dir="debug_payloads"):
     if not DEBUG_MODE:
         return
@@ -30,6 +52,8 @@ def fetch_activity_export(activity_type, start_date, end_date, headers, activity
     Helper function to fetch a single activity type export.
     Returns list of items for the given activity type.
     """
+    session = get_http_session()  # Use shared session for connection reuse
+    
     date_filter = f"'{{{{Activity.Type}}}}' = '{activity_type}' AND '{{{{Activity.CreatedAt}}}}' >= '{start_date}' AND '{{{{Activity.CreatedAt}}}}' < '{end_date}'"
 
     COMBINED_EMAIL_SEND_FIELDS = {
@@ -60,14 +84,14 @@ def fetch_activity_export(activity_type, start_date, end_date, headers, activity
 
     # Step 1: Create export
     logging.info(f"Creating {activity_type} export definition...")
-    export_resp = requests.post(BULK_ACTIVITY_EXPORT_URL, headers=headers, json=export_payload, timeout=30)
+    export_resp = session.post(BULK_ACTIVITY_EXPORT_URL, headers=headers, json=export_payload, timeout=HTTP_TIMEOUT_SHORT)
     export_resp.raise_for_status()
     export_uri = export_resp.json().get("uri")
     logging.info(f"✓ Created {activity_type} export: {export_uri}")
 
     # Step 2: Start sync
     logging.info(f"Starting sync for {activity_type}...")
-    sync_resp = requests.post(BULK_SYNC_URL, headers=headers, json={"syncedInstanceUri": export_uri}, timeout=30)
+    sync_resp = session.post(BULK_SYNC_URL, headers=headers, json={"syncedInstanceUri": export_uri}, timeout=HTTP_TIMEOUT_SHORT)
     sync_resp.raise_for_status()
     sync_uri = sync_resp.json().get("uri")
     logging.info(f"✓ Sync started for {activity_type}: {sync_uri}")
@@ -77,7 +101,7 @@ def fetch_activity_export(activity_type, start_date, end_date, headers, activity
     for attempt in range(SYNC_MAX_ATTEMPTS):
         time.sleep(SYNC_WAIT_SECONDS)
         poll_url = f"{BULK_SYNC_URL}/{sync_uri.split('/')[-1]}"
-        poll_resp = requests.get(poll_url, headers=headers, timeout=30)
+        poll_resp = session.get(poll_url, headers=headers, timeout=HTTP_TIMEOUT_SHORT)
         poll_resp.raise_for_status()
         sync_status = poll_resp.json().get("status")
         logging.info(f"  [{attempt+1}/{SYNC_MAX_ATTEMPTS}] Sync status: {sync_status}")
@@ -109,7 +133,7 @@ def fetch_activity_export(activity_type, start_date, end_date, headers, activity
 
     while True:
         paged_url = f"{base_data_url}?offset={offset}&limit={limit}"
-        data_resp = requests.get(paged_url, headers=download_headers, timeout=60)
+        data_resp = session.get(paged_url, headers=download_headers, timeout=HTTP_TIMEOUT_LONG)
         if data_resp.status_code != 200:
             logging.error(f"Failed to fetch data at offset {offset} for {activity_type}: {data_resp.text}")
             break

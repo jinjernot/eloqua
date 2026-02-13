@@ -7,7 +7,7 @@ import os
 import csv
 import traceback
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Add parent directory to path to import core and config modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -69,7 +69,7 @@ def run_weekly_reports_with_metrics():
         print("ℹ S3 upload disabled - saving locally only\n")
     
     # Calculate date range (last 7 days, ending yesterday)
-    end_date = datetime.utcnow().date() - timedelta(days=1)  # Yesterday
+    end_date = datetime.now(timezone.utc).date() - timedelta(days=1)  # Yesterday
     start_date = end_date - timedelta(days=num_days - 1)
     
     print(f"Date range: {start_date} to {end_date}")

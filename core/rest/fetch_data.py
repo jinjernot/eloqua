@@ -12,6 +12,29 @@ from core.utils import save_json
 DATA_DIR = "data"
 # CONTACT_CACHE_FILE is now imported from config
 
+# HTTP Session for connection reuse - significantly improves performance
+# by reusing TCP connections for multiple requests to the same host
+_http_session = None
+
+def get_http_session():
+    """
+    Get or create a shared requests.Session for connection pooling.
+    Reusing connections reduces TCP handshake overhead and speeds up API calls.
+    """
+    global _http_session
+    if _http_session is None:
+        _http_session = requests.Session()
+        # Configure session for better performance
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,  # Number of connection pools
+            pool_maxsize=50,      # Max connections in pool
+            max_retries=3,        # Retry on network errors
+            pool_block=False
+        )
+        _http_session.mount('http://', adapter)
+        _http_session.mount('https://', adapter)
+    return _http_session
+
 def load_contact_cache():
     """
     Load previously fetched contacts from compressed cache file.
@@ -92,8 +115,10 @@ def fetch_contact_by_id(contact_id):
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
     url = f"{BASE_URL}/api/REST/2.0/data/contact/{contact_id}?depth=complete"
     
+    session = get_http_session()  # Use shared session for connection reuse
+    
     try:
-        response = requests.get(url, headers=headers)
+        response = session.get(url, headers=headers, timeout=HTTP_TIMEOUT_SHORT)
         if response.status_code == 200:
             data = response.json()
             
@@ -236,6 +261,8 @@ def fetch_data(endpoint, filename, extra_params=None):
 
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
     
+    session = get_http_session()  # Use shared session for connection reuse
+    
     # Build parameters
     params = {"count": 5000}
     if extra_params:
@@ -247,7 +274,7 @@ def fetch_data(endpoint, filename, extra_params=None):
     while True:
         params["page"] = page
         try:
-            response = requests.get(endpoint, headers=headers, params=params, timeout=60)
+            response = session.get(endpoint, headers=headers, params=params, timeout=HTTP_TIMEOUT_LONG)
             response.raise_for_status()
             
             data = response.json()

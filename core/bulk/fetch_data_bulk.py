@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core.utils import save_json
@@ -14,6 +14,8 @@ from config import (
     CAMPAIGN_ANALYSIS_ENDPOINT,
     CAMPAIGN_USERS_ENDPOINT,
     EMAIL_ASSET_ENDPOINT,
+    EMAIL_ID_BATCH_SIZE,
+    BATCH_PARALLEL_WORKERS,
 )
 
 DATA_DIR = "data"
@@ -23,7 +25,7 @@ def fetch_and_save_data(target_date=None):
     if target_date:
         start = datetime.strptime(target_date, "%Y-%m-%d")
     else:
-        start = datetime.utcnow() - timedelta(days=1)
+        start = datetime.now(timezone.utc) - timedelta(days=1)
 
     start_str = start.strftime("%Y-%m-%dT00:00:00Z")
     end_str = (start + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
@@ -59,7 +61,7 @@ def fetch_and_save_data(target_date=None):
     # Strategy: Use moderate batch size - some batches may hit limit but better than individual queries
     # Individual queries (batch size 1) only returned 13k opens vs 554k with batch size 12
     # Accepted trade-off: Some data loss at 200k limit is better than massive data loss with individual queries
-    BATCH_SIZE = 12  # Balanced approach - captures most data even if some batches hit limit
+    BATCH_SIZE = EMAIL_ID_BATCH_SIZE  # Configurable via config.py or environment variable
     email_id_batches = []
     if email_ids_list:
         for i in range(0, len(email_ids_list), BATCH_SIZE):
@@ -67,15 +69,19 @@ def fetch_and_save_data(target_date=None):
             email_id_batches.append(batch)
         print(f"[INFO] Split {len(email_ids_list)} email IDs into {len(email_id_batches)} batches of ~{BATCH_SIZE} IDs each")
     
-    # Step 3: Fetch opens and clicks in batches
+    # Step 3: Fetch opens and clicks in batches (PARALLELIZED for speed)
     all_opens = []
     all_clicks = []
     
     if email_id_batches:
-        print(f"[INFO] Fetching opens/clicks for {len(email_id_batches)} batches...")
+        print(f"[INFO] Fetching opens/clicks for {len(email_id_batches)} batches in parallel...")
         print(f"[INFO] Using sentDateHour filter to capture all activity for emails sent on {start_str}")
-        for batch_num, batch in enumerate(email_id_batches, 1):
+        
+        def fetch_batch_data(batch_info):
+            """Fetch opens and clicks for a single batch"""
+            batch_num, batch = batch_info
             email_ids_str = ",".join(batch)
+            
             # CRITICAL FIX: Filter by sentDateHour (when email was sent) not openDateHour (when opened)
             # This ensures we capture ALL opens/clicks for emails sent on target date, regardless of when activity occurred
             # The sentDateHour field in OData shows the original send timestamp
@@ -92,7 +98,7 @@ def fetch_and_save_data(target_date=None):
             opens_orderby = "openDateHour asc"
             clicks_orderby = "clickDateHour asc"
             
-            print(f"[BATCH {batch_num}/{len(email_id_batches)}] Fetching opens/clicks for {len(batch)} email IDs...")
+            print(f"[BATCH {batch_num}/{len(email_id_batches)}] Starting fetch for {len(batch)} email IDs...")
             
             batch_opens = fetch_data(EMAIL_OPEN_ENDPOINT, "email_open.json", 
                                    extra_params={"$filter": opens_filter, "$orderby": opens_orderby})
@@ -102,10 +108,22 @@ def fetch_and_save_data(target_date=None):
             batch_opens_list = batch_opens.get("value", [])
             batch_clicks_list = batch_clicks.get("value", [])
             
-            all_opens.extend(batch_opens_list)
-            all_clicks.extend(batch_clicks_list)
-            
             print(f"[BATCH {batch_num}/{len(email_id_batches)}] Fetched {len(batch_opens_list)} opens, {len(batch_clicks_list)} clicks")
+            return batch_opens_list, batch_clicks_list
+        
+        # Process batches in parallel with ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(BATCH_PARALLEL_WORKERS, len(email_id_batches))) as executor:
+            batch_info_list = [(i+1, batch) for i, batch in enumerate(email_id_batches)]
+            future_to_batch = {executor.submit(fetch_batch_data, batch_info): batch_info for batch_info in batch_info_list}
+            
+            for future in as_completed(future_to_batch):
+                try:
+                    batch_opens_list, batch_clicks_list = future.result()
+                    all_opens.extend(batch_opens_list)
+                    all_clicks.extend(batch_clicks_list)
+                except Exception as exc:
+                    batch_info = future_to_batch[future]
+                    print(f"[ERROR] Batch {batch_info[0]} generated an exception: {exc}")
         
         print(f"[INFO] Total across all batches: {len(all_opens)} opens, {len(all_clicks)} clicks")
     

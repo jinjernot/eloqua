@@ -24,6 +24,32 @@ def debug_print(message):
     if VERBOSE_DEBUG:
         print(message)
 
+def optimize_dataframe_dtypes(df):
+    """
+    Optimize DataFrame memory usage by converting to efficient dtypes.
+    This significantly reduces memory usage and speeds up operations.
+    """
+    if df.empty:
+        return df
+    
+    # Convert object columns with repetitive values to category
+    # Categorical dtypes are much more memory-efficient for columns with limited unique values
+    for col in df.select_dtypes(include=['object']).columns:
+        num_unique = df[col].nunique()
+        num_total = len(df)
+        # Use category if less than 50% unique values
+        if num_unique / num_total < 0.5:
+            df[col] = df[col].astype('category')
+    
+    # Downcast numeric types to smaller dtypes where possible
+    for col in df.select_dtypes(include=['int64']).columns:
+        df[col] = pd.to_numeric(df[col], downcast='integer')
+    
+    for col in df.select_dtypes(include=['float64']).columns:
+        df[col] = pd.to_numeric(df[col], downcast='float')
+    
+    return df
+
 def clean_country_name(country):
     """
     Clean country names by removing 'HP ' prefix that appears in some Eloqua contact data.
@@ -297,6 +323,9 @@ def generate_daily_report(target_date):
     
     df_sends = pd.DataFrame(unique_sends_list)
     
+    # Optimize memory usage before processing
+    df_sends = optimize_dataframe_dtypes(df_sends)
+    
     print(f"[DEBUG] After DataFrame creation: df_sends has {len(df_sends)} rows")
     na34078_after_dedup = len(df_sends[df_sends['assetId'] == '18010'])
     print(f"[DEBUG] NA_34078 after DataFrame: {na34078_after_dedup} rows")
@@ -335,6 +364,7 @@ def generate_daily_report(target_date):
     pd_step_start = time.time()
     if bouncebacks:
         df_bb = pd.DataFrame(bouncebacks)
+        df_bb = optimize_dataframe_dtypes(df_bb)  # Optimize memory usage
         # Handle different possible column names for contactID
         if "contactID" in df_bb.columns:
             df_bb["contactId_str"] = df_bb["contactID"].astype(str)
@@ -384,6 +414,7 @@ def generate_daily_report(target_date):
     df_clicks = pd.DataFrame()  # Initialize to empty DataFrame
     if email_clickthroughs:
         df_clicks = pd.DataFrame(email_clickthroughs)
+        df_clicks = optimize_dataframe_dtypes(df_clicks)  # Optimize memory usage
         if not df_clicks.empty:
             # Handle different possible column names
             if "contactID" in df_clicks.columns:
@@ -451,6 +482,7 @@ def generate_daily_report(target_date):
     pd_step_start = time.time()
     if email_opens:
         df_opens = pd.DataFrame(email_opens)
+        df_opens = optimize_dataframe_dtypes(df_opens)  # Optimize memory usage
         if not df_opens.empty:
             # Handle different possible column names
             if "contactID" in df_opens.columns:
@@ -527,13 +559,19 @@ def generate_daily_report(target_date):
             debug_print(f"[OPENS_MERGE_DEBUG] df_opens sample assetId_str: {df_opens['assetId_str'].head(3).tolist()}")
             debug_print(f"[OPENS_MERGE_DEBUG] df_sends sample assetId_str: {df_sends['assetId_str'].head(3).tolist()}")
             
+            # Convert openDateHour to datetime before aggregation (may be categorical after optimization)
+            # Force conversion from categorical if needed
+            if df_opens['openDateHour'].dtype.name == 'category':
+                df_opens['openDateHour'] = df_opens['openDateHour'].astype(str)
+            df_opens['openDateHour'] = pd.to_datetime(df_opens['openDateHour'], errors='coerce', utc=True)
+            
             # Group by merge key (includes sentDateRounded if available) and get total opens + first open timestamp
             df_open_agg = df_opens.groupby(open_key).agg({
                 'openDateHour': 'min',  # Get earliest open timestamp
             }).reset_index()
             df_open_agg['total_opens'] = df_opens.groupby(open_key).size().values
-            # Convert to datetime and strip timezone for comparison
-            df_open_agg['firstOpenDate'] = pd.to_datetime(df_open_agg['openDateHour'], errors='coerce', utc=True).dt.tz_localize(None)
+            # Strip timezone for comparison (already converted to datetime before aggregation)
+            df_open_agg['firstOpenDate'] = df_open_agg['openDateHour'].dt.tz_localize(None)
             
             print(f"[OPENS DEBUG] df_open_agg shape: {df_open_agg.shape}")
             print(f"[OPENS DEBUG] df_open_agg sample: {df_open_agg.head(3).to_dict('records')}")
