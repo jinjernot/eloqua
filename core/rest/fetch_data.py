@@ -1,16 +1,13 @@
-import os
-import requests
+
 import time
 import json
 import gzip
+import requests
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from core.aws.auth import get_valid_access_token
 from config import *
 from core.utils import save_json
-
-DATA_DIR = "data"
-# CONTACT_CACHE_FILE is now imported from config
 
 # HTTP Session for connection reuse - significantly improves performance
 # by reusing TCP connections for multiple requests to the same host
@@ -24,11 +21,10 @@ def get_http_session():
     global _http_session
     if _http_session is None:
         _http_session = requests.Session()
-        # Configure session for better performance
         adapter = requests.adapters.HTTPAdapter(
-            pool_connections=10,  # Number of connection pools
-            pool_maxsize=50,      # Max connections in pool
-            max_retries=3,        # Retry on network errors
+            pool_connections=HTTP_POOL_CONNECTIONS,
+            pool_maxsize=HTTP_POOL_MAXSIZE,
+            max_retries=HTTP_MAX_RETRIES,
             pool_block=False
         )
         _http_session.mount('http://', adapter)
@@ -62,7 +58,7 @@ def load_contact_cache():
                 cache = json.load(f)
                 print(f"[CACHE] Loaded {len(cache)} contacts from old uncompressed cache")
                 print(f"[CACHE] Converting to compressed format...")
-                save_contact_cache(cache)  # Save in new compressed format
+                save_contact_cache(cache)
                 print(f"[CACHE] Migration complete. Old file can be deleted.")
                 return cache
         except Exception as e:
@@ -84,7 +80,6 @@ def save_contact_cache(cache):
     cache_path = Path(CONTACT_CACHE_FILE)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Save compressed version (primary)
     try:
         with gzip.open(cache_path, 'wt', encoding='utf-8') as f:
             json.dump(cache, f, ensure_ascii=False, separators=(',', ':'))  # Compact format
@@ -94,7 +89,6 @@ def save_contact_cache(cache):
     except Exception as e:
         print(f"[CACHE] Warning: Could not save compressed cache: {e}")
     
-    # Save uncompressed version (backup)
     try:
         backup_path = Path("data/cache/contact_cache.json")
         with open(backup_path, 'w', encoding='utf-8') as f:
@@ -115,17 +109,16 @@ def fetch_contact_by_id(contact_id):
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
     url = f"{BASE_URL}/api/REST/2.0/data/contact/{contact_id}?depth=complete"
     
-    session = get_http_session()  # Use shared session for connection reuse
+    session = get_http_session()
     
     try:
         response = session.get(url, headers=headers, timeout=HTTP_TIMEOUT_SHORT)
         if response.status_code == 200:
             data = response.json()
             
-            # Extract the contact fields we need
             contact_info = {
                 "emailAddress": data.get("emailAddress", ""),
-                "country": data.get("country", ""),  # Get standard country field from root level
+                "country": data.get("country", ""),
                 "hp_role": "",
                 "hp_partner_id": "",
                 "partner_name": "",
@@ -133,27 +126,19 @@ def fetch_contact_by_id(contact_id):
             }
             
             # Parse field values from the contact - map by field ID
-            # Confirmed field IDs from Eloqua instance:
-            # 100195 = C_Market1
-            # 100196 = C_Country (DO NOT USE - contains HP regions, use root level country instead)
-            # 100197 = C_Partner_Name1
-            # 100198 = C_HP_PartnerID1
-            # 100199 = C_HP_Role1
             field_values = data.get("fieldValues", [])
             for field in field_values:
                 field_value = field.get("value", "")
                 field_id = str(field.get("id", ""))
                 
-                if field_value:  # Only map if there's a value
-                    # NOTE: Skip field 100196 (C_Country) - it contains HP regions like "HP ECG"
-                    # We use the root level country field instead which has actual country names
-                    if field_id == "100199":  # C_HP_Role1
+                if field_value:
+                    if field_id == ELOQUA_FIELD_ID_HP_ROLE:
                         contact_info["hp_role"] = field_value
-                    elif field_id == "100198":  # C_HP_PartnerID1
+                    elif field_id == ELOQUA_FIELD_ID_HP_PARTNER_ID:
                         contact_info["hp_partner_id"] = field_value
-                    elif field_id == "100197":  # C_Partner_Name1
+                    elif field_id == ELOQUA_FIELD_ID_PARTNER_NAME:
                         contact_info["partner_name"] = field_value
-                    elif field_id == "100195":  # C_Market1
+                    elif field_id == ELOQUA_FIELD_ID_MARKET:
                         contact_info["market"] = field_value
             
             return contact_info
@@ -164,7 +149,7 @@ def fetch_contact_by_id(contact_id):
         return None
 
 
-def fetch_contacts_batch(contact_ids, max_workers=5, use_cache=True):
+def fetch_contacts_batch(contact_ids, max_workers=None, use_cache=True):
     """
     Fetch multiple contacts in parallel with rate limiting and caching.
     
@@ -178,6 +163,10 @@ def fetch_contacts_batch(contact_ids, max_workers=5, use_cache=True):
     """
     if not contact_ids:
         return {}
+    
+    # Use configured default if not specified
+    if max_workers is None:
+        max_workers = CONTACT_FETCH_MAX_WORKERS
     
     contacts = {}
     
@@ -209,7 +198,7 @@ def fetch_contacts_batch(contact_ids, max_workers=5, use_cache=True):
     print(f"[API] Fetching {to_fetch_count} new contacts via API (this may take {to_fetch_count * REST_API_RATE_LIMIT_DELAY / 60:.1f} minutes)...")
     
     def fetch_with_delay(contact_id):
-        time.sleep(REST_API_RATE_LIMIT_DELAY)  # Rate limiting from config
+        time.sleep(REST_API_RATE_LIMIT_DELAY)
         result = fetch_contact_by_id(contact_id)
         return contact_id, result
     
@@ -264,7 +253,7 @@ def fetch_data(endpoint, filename, extra_params=None):
     session = get_http_session()  # Use shared session for connection reuse
     
     # Build parameters
-    params = {"count": 5000}
+    params = {"count": API_PAGE_SIZE}
     if extra_params:
         params.update(extra_params)
     
@@ -286,15 +275,13 @@ def fetch_data(endpoint, filename, extra_params=None):
             all_data.extend(elements)
             print(f"[INFO] Fetched page {page} from {endpoint.split('/')[-1]}: {len(elements)} records")
             
-            # Pagination limit to prevent runaway queries
-            # 40 pages = 200k records max per query (sufficient for daily reports)
-            if page >= 40:
-                print(f"[INFO] Reached page limit (40 pages = 200k records max)")
+            if page >= API_MAX_PAGES:
+                max_records = API_MAX_PAGES * API_PAGE_SIZE
+                print(f"[INFO] Reached page limit ({API_MAX_PAGES} pages = {max_records} records max)")
                 break
             
-            # Stop if we got a partial page (no more data)
-            if len(elements) < 5000:
-                print(f"[INFO] Received partial page ({len(elements)} < 5000), stopping pagination")
+            if len(elements) < API_PAGE_SIZE:
+                print(f"[INFO] Received partial page ({len(elements)} < {API_PAGE_SIZE}), stopping pagination")
                 break
                 
             page += 1

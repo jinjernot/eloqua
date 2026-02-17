@@ -72,8 +72,6 @@ def fetch_email_html(email_id, save_dir="email_downloads"):
                 return None
         
         os.makedirs(save_dir, exist_ok=True)
-        
-        # Format: SafeEmailName_[email_id].html
         file_name = f"{safe_email_name}_{email_id}.html"
         file_path = os.path.join(save_dir, file_name)
         
