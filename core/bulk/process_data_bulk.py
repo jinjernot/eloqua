@@ -252,11 +252,11 @@ def generate_daily_report(target_date):
         logger.warning("No email sends found. Aborting report.")
         return None
 
-    # Filter out sends without campaignId (non-standard eComm data)
+    # Exclude sends without campaignId to meet reporting requirements.
     email_sends_filtered = [s for s in email_sends if s.get("campaignId")]
-    excluded_no_campaign = len(email_sends) - len(email_sends_filtered)
-    if excluded_no_campaign > 0:
-        logger.info(f"Excluded {excluded_no_campaign} sends without campaignId (non-standard eComm data)")
+    missing_campaign_id = len(email_sends) - len(email_sends_filtered)
+    if missing_campaign_id > 0:
+        logger.info(f"Excluded {missing_campaign_id} sends without campaignId (non-standard eComm data)")
     
     # CRITICAL FIX: Use list-based deduplication to preserve legitimate duplicate sends
     # Problem: Dictionary-based dedup was removing duplicate sends when keys collided
