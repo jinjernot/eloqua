@@ -16,6 +16,7 @@ from config import (
     EMAIL_ASSET_ENDPOINT,
     EMAIL_ID_BATCH_SIZE,
     BATCH_PARALLEL_WORKERS,
+    CAPTURE_WINDOW_START_OFFSET_HOURS,
 )
 
 DATA_DIR = "data"
@@ -23,23 +24,29 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 def fetch_and_save_data(target_date=None):
     if target_date:
-        start = datetime.strptime(target_date, "%Y-%m-%d")
+        target_start = datetime.strptime(target_date, "%Y-%m-%d")
     else:
-        start = datetime.now(timezone.utc) - timedelta(days=1)
+        target_start = datetime.now(timezone.utc) - timedelta(days=1)
 
-    start_str = start.strftime("%Y-%m-%dT00:00:00Z")
-    end_str = (start + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+    # Optional start offset helps capture sends near timezone boundaries.
+    window_start = target_start - timedelta(hours=CAPTURE_WINDOW_START_OFFSET_HOURS)
+    window_end = target_start + timedelta(days=1)
 
-    bounceback_end_date = start + timedelta(days=7)
+    start_str = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_str = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    bounceback_end_date = window_end + timedelta(days=6)
     end_str_bounceback = bounceback_end_date.strftime("%Y-%m-%dT00:00:00Z")
 
     # For engagement (opens/clicks), use a 366-day window
     # This captures opens/clicks up to one year after the send date
-    engagement_end_date = start + timedelta(days=366)
+    engagement_end_date = window_end + timedelta(days=365)
     end_str_engagement = engagement_end_date.strftime("%Y-%m-%dT00:00:00Z")
 
     results = {}
-    print(f"[PERF_DEBUG] Step 1: Fetching email sends to determine email IDs sent on {start_str}")
+    print(f"[PERF_DEBUG] Step 1: Fetching email sends in window {start_str} to {end_str}")
+    if CAPTURE_WINDOW_START_OFFSET_HOURS > 0:
+        print(f"[INFO] Applying capture window start offset: -{CAPTURE_WINDOW_START_OFFSET_HOURS} hours")
     
     # Step 1: Fetch email sends first to get list of email IDs
     email_sends_list = fetch_email_sends_bulk(start_str, end_str)
@@ -54,7 +61,7 @@ def fetch_and_save_data(target_date=None):
             email_ids.add(str(asset_id))
     
     email_ids_list = sorted(email_ids)
-    print(f"[INFO] Found {len(email_ids_list)} unique email IDs sent on {start_str}")
+    print(f"[INFO] Found {len(email_ids_list)} unique email IDs in send window")
     print(f"[INFO] Email IDs: {email_ids_list[:10]}{'...' if len(email_ids_list) > 10 else ''}")
     
     # Step 2: Split email IDs into batches to avoid 200k API record limit
@@ -75,7 +82,7 @@ def fetch_and_save_data(target_date=None):
     
     if email_id_batches:
         print(f"[INFO] Fetching opens/clicks for {len(email_id_batches)} batches in parallel...")
-        print(f"[INFO] Using sentDateHour filter to capture all activity for emails sent on {start_str}")
+        print(f"[INFO] Using sentDateHour filter for send window {start_str} to {end_str}")
         
         def fetch_batch_data(batch_info):
             """Fetch opens and clicks for a single batch"""

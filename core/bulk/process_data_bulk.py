@@ -1109,12 +1109,12 @@ def generate_daily_report(target_date):
     
     debug_print(f"[PERF_DEBUG] Filtered {EXCLUDE_EMAIL_DOMAIN} and excluded test emails, {len(df_sends)} rows remaining (removed {initial_count - len(df_sends)}).")
     
-    # After filtering, remove forwards for campaigns that no longer have any sends
-    # This matches Eloqua Analytics behavior: forwards only shown if campaign has valid sends
-    campaigns_after_filtering = set(df_sends[df_sends['emailSendType'] == 'EmailSend']['assetId_str'].unique())
+    # After filtering, remove forwards for campaigns that had no original sends on target date.
+    # Keep external forwards even when all original sends were filtered out by domain rules.
+    campaigns_after_filtering = set(campaigns_with_sends)
     forwards_before = (df_sends['emailSendType'].isin(['EmailForward', 'Forwarded'])).sum()
     
-    # Remove forwards for campaigns without sends
+    # Remove forwards only for campaigns not present in original target-date sends.
     forwards_to_remove = (
         df_sends['emailSendType'].isin(['EmailForward', 'Forwarded']) & 
         ~df_sends['assetId_str'].isin(campaigns_after_filtering)
