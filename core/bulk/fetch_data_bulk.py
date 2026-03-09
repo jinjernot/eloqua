@@ -17,6 +17,7 @@ from config import (
     EMAIL_ID_BATCH_SIZE,
     BATCH_PARALLEL_WORKERS,
     CAPTURE_WINDOW_START_OFFSET_HOURS,
+    CAPTURE_WINDOW_END_OFFSET_HOURS,
 )
 
 DATA_DIR = "data"
@@ -31,17 +32,18 @@ def fetch_and_save_data(target_date=None):
     # Optional start offset helps capture sends near timezone boundaries.
     window_start = target_start - timedelta(hours=CAPTURE_WINDOW_START_OFFSET_HOURS)
     window_end = target_start + timedelta(days=1)
+    engagement_window_end = window_end + timedelta(hours=CAPTURE_WINDOW_END_OFFSET_HOURS)
 
     start_str = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_str = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_str_engagement = engagement_window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     bounceback_end_date = window_end + timedelta(days=6)
     end_str_bounceback = bounceback_end_date.strftime("%Y-%m-%dT00:00:00Z")
 
-    # For engagement (opens/clicks), use a 366-day window
-    # This captures opens/clicks up to one year after the send date
-    engagement_end_date = window_end + timedelta(days=365)
-    end_str_engagement = engagement_end_date.strftime("%Y-%m-%dT00:00:00Z")
+    # Optional end offset helps capture late local-time sends that cross UTC midnight.
+    if CAPTURE_WINDOW_END_OFFSET_HOURS > 0:
+        print(f"[INFO] Applying capture window end offset: +{CAPTURE_WINDOW_END_OFFSET_HOURS} hours")
 
     results = {}
     print(f"[PERF_DEBUG] Step 1: Fetching email sends in window {start_str} to {end_str}")
@@ -82,40 +84,70 @@ def fetch_and_save_data(target_date=None):
     
     if email_id_batches:
         print(f"[INFO] Fetching opens/clicks for {len(email_id_batches)} batches in parallel...")
-        print(f"[INFO] Using sentDateHour filter for send window {start_str} to {end_str}")
+        print(f"[INFO] Using sentDateHour filter for send window {start_str} to {end_str_engagement}")
         
         def fetch_batch_data(batch_info):
             """Fetch opens and clicks for a single batch"""
             batch_num, batch = batch_info
-            email_ids_str = ",".join(batch)
-            
-            # CRITICAL FIX: Filter by sentDateHour (when email was sent) not openDateHour (when opened)
-            # This ensures we capture ALL opens/clicks for emails sent on target date, regardless of when activity occurred
-            # The sentDateHour field in OData shows the original send timestamp
-            # Upper bound: Use engagement window (366 days) to capture late opens/clicks but filter by send date
-            # This fixes: Opens before Jan 24 missing, because we now correctly identify which report they belong to
-            opens_filter = (
-                f"emailID in ({email_ids_str}) and "
-                f"sentDateHour ge {start_str} and sentDateHour lt {end_str}"
-            )
-            clicks_filter = (
-                f"emailID in ({email_ids_str}) and "
-                f"sentDateHour ge {start_str} and sentDateHour lt {end_str}"
-            )
-            opens_orderby = "openDateHour asc"
-            clicks_orderby = "clickDateHour asc"
-            
+
+            def fetch_batch_recursive(email_id_subset, label):
+                email_ids_str = ",".join(email_id_subset)
+                opens_filter = (
+                    f"emailID in ({email_ids_str}) and "
+                    f"sentDateHour ge {start_str} and sentDateHour lt {end_str_engagement}"
+                )
+                clicks_filter = (
+                    f"emailID in ({email_ids_str}) and "
+                    f"sentDateHour ge {start_str} and sentDateHour lt {end_str_engagement}"
+                )
+
+                batch_opens = fetch_data(
+                    EMAIL_OPEN_ENDPOINT,
+                    "email_open.json",
+                    extra_params={"$filter": opens_filter, "$orderby": "openDateHour asc"},
+                )
+                batch_clicks = fetch_data(
+                    CLICKTHROUGH_ENDPOINT,
+                    "email_clickthrough.json",
+                    extra_params={"$filter": clicks_filter, "$orderby": "clickDateHour asc"},
+                )
+
+                batch_opens_list = batch_opens.get("value", [])
+                batch_clicks_list = batch_clicks.get("value", [])
+
+                opens_truncated = batch_opens.get("_meta", {}).get("truncated", False)
+                clicks_truncated = batch_clicks.get("_meta", {}).get("truncated", False)
+
+                # If pagination was clipped and we have multiple email IDs, split and retry.
+                if (opens_truncated or clicks_truncated) and len(email_id_subset) > 1:
+                    midpoint = len(email_id_subset) // 2
+                    left = email_id_subset[:midpoint]
+                    right = email_id_subset[midpoint:]
+                    print(
+                        f"[BATCH {batch_num}/{len(email_id_batches)} {label}] "
+                        f"Detected truncated results (opens={opens_truncated}, clicks={clicks_truncated}) "
+                        f"for {len(email_id_subset)} email IDs; splitting into {len(left)} + {len(right)}"
+                    )
+
+                    left_opens, left_clicks = fetch_batch_recursive(left, f"{label}L")
+                    right_opens, right_clicks = fetch_batch_recursive(right, f"{label}R")
+                    return left_opens + right_opens, left_clicks + right_clicks
+
+                if (opens_truncated or clicks_truncated) and len(email_id_subset) == 1:
+                    print(
+                        f"[WARNING] [BATCH {batch_num}/{len(email_id_batches)} {label}] "
+                        f"Single-email query still truncated (opens={opens_truncated}, clicks={clicks_truncated}) "
+                        f"for emailID {email_id_subset[0]}"
+                    )
+
+                return batch_opens_list, batch_clicks_list
+
             print(f"[BATCH {batch_num}/{len(email_id_batches)}] Starting fetch for {len(batch)} email IDs...")
-            
-            batch_opens = fetch_data(EMAIL_OPEN_ENDPOINT, "email_open.json", 
-                                   extra_params={"$filter": opens_filter, "$orderby": opens_orderby})
-            batch_clicks = fetch_data(CLICKTHROUGH_ENDPOINT, "email_clickthrough.json",
-                                    extra_params={"$filter": clicks_filter, "$orderby": clicks_orderby})
-            
-            batch_opens_list = batch_opens.get("value", [])
-            batch_clicks_list = batch_clicks.get("value", [])
-            
-            print(f"[BATCH {batch_num}/{len(email_id_batches)}] Fetched {len(batch_opens_list)} opens, {len(batch_clicks_list)} clicks")
+            batch_opens_list, batch_clicks_list = fetch_batch_recursive(batch, "root")
+            print(
+                f"[BATCH {batch_num}/{len(email_id_batches)}] "
+                f"Fetched {len(batch_opens_list)} opens, {len(batch_clicks_list)} clicks"
+            )
             return batch_opens_list, batch_clicks_list
         
         # Process batches in parallel with ThreadPoolExecutor

@@ -258,6 +258,8 @@ def fetch_data(endpoint, filename, extra_params=None):
         params.update(extra_params)
     
     all_data = []
+    reached_page_limit = False
+    pages_fetched = 0
     page = 1
     
     while True:
@@ -273,11 +275,13 @@ def fetch_data(endpoint, filename, extra_params=None):
                 break
                 
             all_data.extend(elements)
+            pages_fetched = page
             print(f"[INFO] Fetched page {page} from {endpoint.split('/')[-1]}: {len(elements)} records")
             
             if page >= API_MAX_PAGES:
                 max_records = API_MAX_PAGES * API_PAGE_SIZE
                 print(f"[INFO] Reached page limit ({API_MAX_PAGES} pages = {max_records} records max)")
+                reached_page_limit = True
                 break
             
             if len(elements) < API_PAGE_SIZE:
@@ -291,4 +295,10 @@ def fetch_data(endpoint, filename, extra_params=None):
             print(f"[ERROR] Failed to fetch data from {endpoint}: {e}")
             break
     
-    return {"value": all_data}
+    return {
+        "value": all_data,
+        "_meta": {
+            "truncated": reached_page_limit,
+            "pages_fetched": pages_fetched,
+        },
+    }
