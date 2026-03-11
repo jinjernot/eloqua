@@ -625,6 +625,36 @@ def generate_daily_report(target_date):
                                          how="left")
                 logger.info(f"[OPENS] Merged using sentDateHour - opens attributed to correct send by timestamp")
                 logger.info(f"[OPENS] This matches Eloqua manual export methodology for duplicate sends")
+
+                # Fallback: recover opens where contactId changed after send (Eloqua contact merges/deduplication)
+                # Contacts merged in Eloqua between send date and open date get a new contactId in OData opens,
+                # breaking the primary 3-key merge. Retry those unmatched rows using emailAddress instead.
+                unmatched_mask = df_sends['total_opens'].isna()
+                if unmatched_mask.any():
+                    df_opens_with_email = df_opens[df_opens['emailAddress'].str.strip().ne('')].copy()
+                    if not df_opens_with_email.empty:
+                        df_opens_with_email['emailAddress_lower'] = df_opens_with_email['emailAddress'].str.strip().str.lower()
+                        email_key = ["assetId_str", "emailAddress_lower", "sentDateRounded"]
+                        df_open_agg_email = df_opens_with_email.groupby(email_key).agg(
+                            firstOpenDate_fb=('openDateHour', 'min'),
+                            total_opens_fb=('openDateHour', 'size')
+                        ).reset_index()
+                        df_open_agg_email['firstOpenDate_fb'] = df_open_agg_email['firstOpenDate_fb'].dt.tz_localize(None)
+
+                        unmatched_idx = df_sends.index[unmatched_mask]
+                        unmatched_sends = df_sends.loc[unmatched_idx, ["assetId_str", "activityDateRounded"]].copy()
+                        unmatched_sends['emailAddress_lower'] = df_sends.loc[unmatched_idx, 'emailAddress'].str.strip().str.lower().values
+                        recovered = unmatched_sends.merge(
+                            df_open_agg_email,
+                            left_on=["assetId_str", "emailAddress_lower", "activityDateRounded"],
+                            right_on=["assetId_str", "emailAddress_lower", "sentDateRounded"],
+                            how="left"
+                        )
+                        recovered_count = int(recovered['total_opens_fb'].notna().sum())
+                        df_sends.loc[unmatched_idx, 'total_opens'] = recovered['total_opens_fb'].values
+                        df_sends.loc[unmatched_idx, 'firstOpenDate'] = recovered['firstOpenDate_fb'].values
+                        logger.info(f"[OPENS] Email-address fallback recovered {recovered_count} opens ({unmatched_mask.sum()} unmatched rows checked)")
+                        print(f"[OPENS FALLBACK] Recovered {recovered_count} opens via email-address fallback out of {unmatched_mask.sum()} unmatched rows")
             else:
                 # Fallback to old method if sentDateHour not available
                 df_sends = df_sends.merge(df_open_agg, on=open_key, how="left")

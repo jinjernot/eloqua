@@ -18,6 +18,7 @@ from config import (
     BATCH_PARALLEL_WORKERS,
     CAPTURE_WINDOW_START_OFFSET_HOURS,
     CAPTURE_WINDOW_END_OFFSET_HOURS,
+    CAPTURE_WINDOW_BOUNCEBACK_DAYS,
 )
 
 DATA_DIR = "data"
@@ -38,8 +39,9 @@ def fetch_and_save_data(target_date=None):
     end_str = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_str_engagement = engagement_window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    bounceback_end_date = window_end + timedelta(days=6)
+    bounceback_end_date = window_end + timedelta(days=CAPTURE_WINDOW_BOUNCEBACK_DAYS)
     end_str_bounceback = bounceback_end_date.strftime("%Y-%m-%dT00:00:00Z")
+    print(f"[INFO] Bounceback capture window: {start_str} to {end_str_bounceback} ({CAPTURE_WINDOW_BOUNCEBACK_DAYS} days after send date)")
 
     # Optional end offset helps capture late local-time sends that cross UTC midnight.
     if CAPTURE_WINDOW_END_OFFSET_HOURS > 0:
