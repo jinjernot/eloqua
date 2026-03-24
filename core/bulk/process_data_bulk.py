@@ -631,7 +631,26 @@ def generate_daily_report(target_date):
                 # breaking the primary 3-key merge. Retry those unmatched rows using emailAddress instead.
                 unmatched_mask = df_sends['total_opens'].isna()
                 if unmatched_mask.any():
-                    df_opens_with_email = df_opens[df_opens['emailAddress'].str.strip().ne('')].copy()
+                    # The OData EmailOpen endpoint does not always return emailAddress.
+                    # When it is absent (or all empty), enrich it from contact_cache / contact_lookup
+                    # so the email-address fallback can still fire.
+                    if 'emailAddress' not in df_opens.columns:
+                        df_opens['emailAddress'] = ''
+                    empty_email_mask = df_opens['emailAddress'].isna() | (df_opens['emailAddress'].astype(str).str.strip() == '')
+                    if empty_email_mask.any():
+                        def _lookup_email(cid):
+                            cid = str(cid)
+                            return (
+                                (contact_cache.get(cid) or {}).get('emailAddress', '')
+                                or (contact_lookup.get(cid) or {}).get('emailAddress', '')
+                            )
+                        df_opens.loc[empty_email_mask, 'emailAddress'] = (
+                            df_opens.loc[empty_email_mask, 'contactId_str'].map(_lookup_email)
+                        )
+                        enriched_count = int((df_opens.loc[empty_email_mask, 'emailAddress'].str.strip() != '').sum())
+                        print(f"[OPENS FALLBACK] Enriched {enriched_count}/{int(empty_email_mask.sum())} open records with email from contact cache")
+                        logger.info(f"[OPENS] Email fallback: enriched {enriched_count} open records from contact cache ({int(empty_email_mask.sum())} had no email in OData response)")
+                    df_opens_with_email = df_opens[df_opens['emailAddress'].astype(str).str.strip().ne('')].copy()
                     if not df_opens_with_email.empty:
                         df_opens_with_email['emailAddress_lower'] = df_opens_with_email['emailAddress'].str.strip().str.lower()
                         email_key = ["assetId_str", "emailAddress_lower", "sentDateRounded"]

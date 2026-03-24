@@ -232,7 +232,7 @@ def fetch_contacts_batch(contact_ids, max_workers=None, use_cache=True):
     return contacts
 
 
-def fetch_data(endpoint, filename, extra_params=None):
+def fetch_data(endpoint, filename, extra_params=None, max_pages=None):
     """
     Fetch data from Eloqua OData endpoint.
     
@@ -240,6 +240,7 @@ def fetch_data(endpoint, filename, extra_params=None):
         endpoint: The OData endpoint URL
         filename: Filename for saving (not used anymore, kept for compatibility)
         extra_params: Optional dict of additional query parameters (e.g., $filter)
+        max_pages: Optional override for maximum pages to fetch (defaults to API_MAX_PAGES config value)
     
     Returns:
         Dictionary with API response data
@@ -257,6 +258,7 @@ def fetch_data(endpoint, filename, extra_params=None):
     if extra_params:
         params.update(extra_params)
     
+    page_limit = max_pages if max_pages is not None else API_MAX_PAGES
     all_data = []
     reached_page_limit = False
     pages_fetched = 0
@@ -278,9 +280,9 @@ def fetch_data(endpoint, filename, extra_params=None):
             pages_fetched = page
             print(f"[INFO] Fetched page {page} from {endpoint.split('/')[-1]}: {len(elements)} records")
             
-            if page >= API_MAX_PAGES:
-                max_records = API_MAX_PAGES * API_PAGE_SIZE
-                print(f"[INFO] Reached page limit ({API_MAX_PAGES} pages = {max_records} records max)")
+            if page >= page_limit:
+                max_records = page_limit * API_PAGE_SIZE
+                print(f"[INFO] Reached page limit ({page_limit} pages = {max_records} records max)")
                 reached_page_limit = True
                 break
             

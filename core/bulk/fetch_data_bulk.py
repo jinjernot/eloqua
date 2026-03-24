@@ -142,6 +142,77 @@ def fetch_and_save_data(target_date=None):
                         f"for emailID {email_id_subset[0]}"
                     )
 
+                    # Two supplemental fetches to recover late openers cut off by the pagination cap.
+                    #
+                    # Root cause: emails with heavy bot/scanner traffic generate hundreds of repeat open
+                    # events per contact. These fill the 200k page cap (pages 1-40) with early opens
+                    # (e.g., Feb 16-19), leaving genuine late human openers (Feb 20+) unreachable.
+                    #
+                    # Supplemental 1 — firstOpen eq 1 (ascending):
+                    #   Returns exactly one record per contact who is opening this email for the first
+                    #   time ever. Catches late first-time openers cleanly with no page cap risk.
+                    #
+                    # Supplemental 2 — openDateHour desc (reverse chronological, 1 page):
+                    #   Fetches the 5000 most-recent open events. After dedup with the primary and
+                    #   supplemental-1 results, this catches late repeat-openers (firstOpen=0) who
+                    #   previously opened the same email asset in a prior campaign.
+                    #
+                    # All results are unioned additively via (contactID, sentDateHour) dedup — no
+                    # double-counting, no data loss.
+                    if opens_truncated:
+                        existing_keys = frozenset(
+                            (r.get("contactID"), r.get("sentDateHour")) for r in batch_opens_list
+                        )
+
+                        # ── Supplemental 1: firstOpen eq 1 ───────────────────────────────────────
+                        supp1_filter = (
+                            f"emailID in ({email_ids_str}) and "
+                            f"sentDateHour ge {start_str} and sentDateHour lt {end_str_engagement} and firstOpen eq 1"
+                        )
+                        supp1_result = fetch_data(
+                            EMAIL_OPEN_ENDPOINT,
+                            "email_open_supp1.json",
+                            extra_params={"$filter": supp1_filter, "$orderby": "openDateHour asc"},
+                        )
+                        supp1_list = supp1_result.get("value", [])
+                        if supp1_result.get("_meta", {}).get("truncated", False):
+                            print(
+                                f"[WARNING] [BATCH {batch_num}/{len(email_id_batches)} {label}] "
+                                f"firstOpen=1 supplemental also truncated for emailID {email_id_subset[0]}"
+                            )
+                        new1 = [r for r in supp1_list if (r.get("contactID"), r.get("sentDateHour")) not in existing_keys]
+                        batch_opens_list = batch_opens_list + new1
+                        existing_keys = existing_keys | frozenset((r.get("contactID"), r.get("sentDateHour")) for r in new1)
+                        print(
+                            f"[SUPPLEMENTAL-1] emailID {email_id_subset[0]}: "
+                            f"firstOpen=1 recovered {len(new1)} late first-time openers "
+                            f"({len(supp1_list)} firstOpen records total)"
+                        )
+
+                        # ── Supplemental 2: most-recent opens (desc) to catch firstOpen=0 late openers ─
+                        # Fetching in reverse chronological order surfaces late human opens (weeks after
+                        # send) before bot repeats (concentrated in first 2-3 days after send).
+                        # 1 page (5000 records) is sufficient: late human opens number in the hundreds,
+                        # and dedup ensures no overlap with the primary or supplemental-1 results.
+                        supp2_filter = (
+                            f"emailID in ({email_ids_str}) and "
+                            f"sentDateHour ge {start_str} and sentDateHour lt {end_str_engagement}"
+                        )
+                        supp2_result = fetch_data(
+                            EMAIL_OPEN_ENDPOINT,
+                            "email_open_supp2.json",
+                            extra_params={"$filter": supp2_filter, "$orderby": "openDateHour desc"},
+                            max_pages=1,
+                        )
+                        supp2_list = supp2_result.get("value", [])
+                        new2 = [r for r in supp2_list if (r.get("contactID"), r.get("sentDateHour")) not in existing_keys]
+                        batch_opens_list = batch_opens_list + new2
+                        print(
+                            f"[SUPPLEMENTAL-2] emailID {email_id_subset[0]}: "
+                            f"reverse-order fetch recovered {len(new2)} additional late openers "
+                            f"({len(supp2_list)} records fetched desc)"
+                        )
+
                 return batch_opens_list, batch_clicks_list
 
             print(f"[BATCH {batch_num}/{len(email_id_batches)}] Starting fetch for {len(batch)} email IDs...")

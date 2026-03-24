@@ -15,7 +15,7 @@ from core.bulk.process_data_bulk import generate_daily_report
 from config import SAVE_LOCALLY
 
 # Override SAVE_LOCALLY for this run to skip AWS checks
-SAVE_LOCALLY = True
+SAVE_LOCALLY = False
 
 
 # Automatically authenticate to AWS if needed
