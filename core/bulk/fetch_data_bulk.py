@@ -1,4 +1,6 @@
 import os
+import gzip
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,6 +26,66 @@ from config import (
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
+# Static data (campaigns, users, email assets) rarely changes day-to-day.
+# Cache it locally to avoid redundant API calls during multi-day backfills.
+_STATIC_CACHE_DIR = os.path.join(DATA_DIR, "cache")
+_STATIC_CACHE_TTL_SECONDS = 4 * 3600  # 4 hours
+
+def _load_static_cache(cache_file):
+    """Return cached data if the file exists and is younger than the TTL, else None."""
+    if not os.path.exists(cache_file):
+        return None
+    age = time.time() - os.path.getmtime(cache_file)
+    if age > _STATIC_CACHE_TTL_SECONDS:
+        print(f"[STATIC CACHE] Expired ({age/3600:.1f}h old): {cache_file}")
+        return None
+    try:
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        print(f"[STATIC CACHE] Hit ({age/60:.1f}m old): {os.path.basename(cache_file)} — {len(data.get('value', []))} records")
+        return data
+    except Exception as e:
+        print(f"[STATIC CACHE] Failed to load {cache_file}: {e}")
+        return None
+
+def _save_static_cache(data, cache_file):
+    """Persist static data to a JSON cache file."""
+    try:
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, separators=(',', ':'))
+        print(f"[STATIC CACHE] Saved: {os.path.basename(cache_file)} — {len(data.get('value', []))} records")
+    except Exception as e:
+        print(f"[STATIC CACHE] Failed to save {cache_file}: {e}")
+
+# Per-date raw data (sends, opens, clicks) cached to allow fast backfill re-runs.
+# Historical activity records are immutable so no TTL is needed.
+_DAILY_CACHE_DIR = os.path.join(DATA_DIR, "cache", "daily")
+
+def _load_daily_cache(cache_file):
+    """Return cached list data if the file exists. No TTL — historical data never changes."""
+    if not os.path.exists(cache_file):
+        return None
+    try:
+        with gzip.open(cache_file, 'rt', encoding='utf-8') as f:
+            data = json.load(f)
+        print(f"[DAILY CACHE] Hit: {os.path.basename(cache_file)} \u2014 {len(data)} records")
+        return data
+    except Exception as e:
+        print(f"[DAILY CACHE] Failed to load {cache_file}: {e}")
+        return None
+
+def _save_daily_cache(data, cache_file):
+    """Persist list data to a gzip JSON cache file."""
+    try:
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        with gzip.open(cache_file, 'wt', encoding='utf-8') as f:
+            json.dump(data, f, separators=(',', ':'))
+        size_kb = os.path.getsize(cache_file) / 1024
+        print(f"[DAILY CACHE] Saved: {os.path.basename(cache_file)} \u2014 {len(data)} records ({size_kb:.0f} KB)")
+    except Exception as e:
+        print(f"[DAILY CACHE] Failed to save {cache_file}: {e}")
+
 def fetch_and_save_data(target_date=None):
     if target_date:
         target_start = datetime.strptime(target_date, "%Y-%m-%d")
@@ -48,14 +110,41 @@ def fetch_and_save_data(target_date=None):
         print(f"[INFO] Applying capture window end offset: +{CAPTURE_WINDOW_END_OFFSET_HOURS} hours")
 
     results = {}
+    # Per-date cache file paths (keyed on target date)
+    date_key   = target_start.strftime("%Y-%m-%d")
+    _sends_cf  = os.path.join(_DAILY_CACHE_DIR, f"{date_key}_sends.json.gz")
+    _opens_cf  = os.path.join(_DAILY_CACHE_DIR, f"{date_key}_opens.json.gz")
+    _clicks_cf = os.path.join(_DAILY_CACHE_DIR, f"{date_key}_clicks.json.gz")
+    _pre_sends  = _load_daily_cache(_sends_cf)
+    _pre_opens  = _load_daily_cache(_opens_cf)
+    _pre_clicks = _load_daily_cache(_clicks_cf)
+
     print(f"[PERF_DEBUG] Step 1: Fetching email sends in window {start_str} to {end_str}")
     if CAPTURE_WINDOW_START_OFFSET_HOURS > 0:
         print(f"[INFO] Applying capture window start offset: -{CAPTURE_WINDOW_START_OFFSET_HOURS} hours")
     
     # Step 1: Fetch email sends first to get list of email IDs
-    email_sends_list = fetch_email_sends_bulk(start_str, end_str)
+    if _pre_sends is not None:
+        email_sends_list = _pre_sends
+        print(f"[DAILY CACHE] Loaded {len(email_sends_list)} sends from cache for {date_key}")
+    else:
+        email_sends_list = fetch_email_sends_bulk(start_str, end_str)
+        _save_daily_cache(email_sends_list, _sends_cf)
     results["email_sends"] = {"items": email_sends_list}  # Wrap in dict for compatibility
     print(f"[PERF_DEBUG] Successfully fetched email_sends: {len(email_sends_list)} records")
+
+    # Short-circuit: no sends means no opens/clicks/bouncebacks to fetch
+    if not email_sends_list:
+        print(f"[INFO] No sends found for {date_key} — skipping opens/clicks/bouncebacks fetch")
+        return {
+            "email_sends": [],
+            "bouncebacks": [],
+            "email_clickthroughs": {"value": []},
+            "email_opens": {"value": []},
+            "campaign_analysis": {},
+            "campaign_users": {},
+            "email_asset_data": {},
+        }
     
     # Extract unique email IDs from sends
     email_ids = set()
@@ -83,8 +172,12 @@ def fetch_and_save_data(target_date=None):
     # Step 3: Fetch opens and clicks in batches (PARALLELIZED for speed)
     all_opens = []
     all_clicks = []
-    
-    if email_id_batches:
+
+    if _pre_opens is not None and _pre_clicks is not None:
+        print(f"[DAILY CACHE] Loaded {len(_pre_opens)} opens, {len(_pre_clicks)} clicks from cache for {date_key}")
+        results["email_opens"] = {"value": _pre_opens}
+        results["email_clickthroughs"] = {"value": _pre_clicks}
+    elif email_id_batches:
         print(f"[INFO] Fetching opens/clicks for {len(email_id_batches)} batches in parallel...")
         print(f"[INFO] Using sentDateHour filter for send window {start_str} to {end_str_engagement}")
         
@@ -238,37 +331,74 @@ def fetch_and_save_data(target_date=None):
                     print(f"[ERROR] Batch {batch_info[0]} generated an exception: {exc}")
         
         print(f"[INFO] Total across all batches: {len(all_opens)} opens, {len(all_clicks)} clicks")
-    
-    # Remove the individual query code below
-    
-        print(f"[INFO] Total across all batches: {len(all_opens)} opens, {len(all_clicks)} clicks")
         results["email_opens"] = {"value": all_opens}
         results["email_clickthroughs"] = {"value": all_clicks}
+        _save_daily_cache(all_opens, _opens_cf)
+        _save_daily_cache(all_clicks, _clicks_cf)
     else:
         # Fallback if no email IDs found
         print(f"[WARNING] No email IDs found in sends")
         results["email_opens"] = {"value": []}
         results["email_clickthroughs"] = {"value": []}
     
-    # Step 4: Fetch remaining data (bouncebacks, campaigns, etc.) in parallel
-    print(f"[PERF_DEBUG] Step 4: Starting ThreadPoolExecutor for remaining 4 data fetches.")
+    # Step 4: Fetch remaining data (bouncebacks, campaigns, etc.) in parallel.
+    # campaign_analysis, campaign_users, and email_asset_data are static across days
+    # and are served from a local cache (TTL=4h) to avoid redundant API calls.
+    print(f"[PERF_DEBUG] Step 4: Fetching bouncebacks + static data (with cache).")
+
+    _campaign_cache_file  = os.path.join(_STATIC_CACHE_DIR, "campaign_analysis_cache.json")
+    _users_cache_file     = os.path.join(_STATIC_CACHE_DIR, "campaign_users_cache.json")
+    _asset_cache_file     = os.path.join(_STATIC_CACHE_DIR, "email_asset_cache.json")
+
+    cached_campaign  = _load_static_cache(_campaign_cache_file)
+    cached_users     = _load_static_cache(_users_cache_file)
+    cached_assets    = _load_static_cache(_asset_cache_file)
+
+    # Only enqueue API fetches for data that isn't cached
+    futures_to_enqueue = {
+        "bouncebacks": (fetch_data, BOUNCEBACK_OData_ENDPOINT, "bouncebacks_odata.json",
+                        {"$filter": f"bounceBackDateHour ge {start_str} and bounceBackDateHour lt {end_str_bounceback}"}),
+    }
+    if cached_campaign is None:
+        futures_to_enqueue["campaign_analysis"] = (fetch_data, CAMPAIGN_ANALYSIS_ENDPOINT, "campaign.json", None)
+    if cached_users is None:
+        futures_to_enqueue["campaign_users"] = (fetch_data, CAMPAIGN_USERS_ENDPOINT, "campaign_users.json", None)
+    if cached_assets is None:
+        futures_to_enqueue["email_asset_data"] = (fetch_data, EMAIL_ASSET_ENDPOINT, "email_asset.json", None)
+
+    fetched_static = {}
     with ThreadPoolExecutor(max_workers=8) as executor:
-        future_to_key = {
-            executor.submit(fetch_data, BOUNCEBACK_OData_ENDPOINT, "bouncebacks_odata.json", extra_params={"$filter": f"bounceBackDateHour ge {start_str} and bounceBackDateHour lt {end_str_bounceback}"}): "bouncebacks",
-            executor.submit(fetch_data, CAMPAIGN_ANALYSIS_ENDPOINT, "campaign.json"): "campaign_analysis",
-            executor.submit(fetch_data, CAMPAIGN_USERS_ENDPOINT, "campaign_users.json"): "campaign_users",
-            executor.submit(fetch_data, EMAIL_ASSET_ENDPOINT, "email_asset.json"): "email_asset_data"
-        }
+        future_to_key = {}
+        for key, args in futures_to_enqueue.items():
+            fn, endpoint, fname, extra = args[0], args[1], args[2], args[3]
+            if extra:
+                future_to_key[executor.submit(fn, endpoint, fname, extra_params=extra)] = key
+            else:
+                future_to_key[executor.submit(fn, endpoint, fname)] = key
 
         for future in as_completed(future_to_key):
             key = future_to_key[future]
             try:
                 data = future.result()
-                results[key] = data
+                fetched_static[key] = data
                 print(f"[PERF_DEBUG] Successfully fetched (from thread pool): {key}")
             except Exception as exc:
                 print(f"[ERROR] {key} generated an exception: {exc}")
-                results[key] = None
+                fetched_static[key] = None
+
+    # Persist newly fetched static data to cache
+    if "campaign_analysis" in fetched_static and fetched_static["campaign_analysis"]:
+        _save_static_cache(fetched_static["campaign_analysis"], _campaign_cache_file)
+    if "campaign_users" in fetched_static and fetched_static["campaign_users"]:
+        _save_static_cache(fetched_static["campaign_users"], _users_cache_file)
+    if "email_asset_data" in fetched_static and fetched_static["email_asset_data"]:
+        _save_static_cache(fetched_static["email_asset_data"], _asset_cache_file)
+
+    # Merge cached + freshly fetched into results
+    results["bouncebacks"]      = fetched_static.get("bouncebacks")
+    results["campaign_analysis"]  = cached_campaign  or fetched_static.get("campaign_analysis")
+    results["campaign_users"]     = cached_users     or fetched_static.get("campaign_users")
+    results["email_asset_data"]   = cached_assets    or fetched_static.get("email_asset_data")
     
     print(f"[PERF_DEBUG] ThreadPoolExecutor finished.")
 

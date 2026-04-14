@@ -7,8 +7,6 @@ from core.aws.auth import get_valid_access_token
 from core.utils import save_json
 from config import *
 
-DEBUG_MODE = True  # Enable to save raw API responses for investigation
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # HTTP Session for connection reuse - significantly improves performance
@@ -96,23 +94,29 @@ def fetch_activity_export(activity_type, start_date, end_date, headers, activity
     sync_uri = sync_resp.json().get("uri")
     logging.info(f"✓ Sync started for {activity_type}: {sync_uri}")
 
-    # Step 3: Poll sync
-    logging.info(f"Polling sync status for {activity_type} (max {SYNC_MAX_ATTEMPTS * SYNC_WAIT_SECONDS}s)...")
+    # Step 3: Poll sync with exponential backoff
+    # Starts at 2s and caps at SYNC_WAIT_SECONDS to catch fast syncs early
+    # while still tolerating large exports.
+    max_wait = SYNC_WAIT_SECONDS  # ceiling from config (default 10s)
+    total_waited = 0
+    poll_url = f"{BULK_SYNC_URL}/{sync_uri.split('/')[-1]}"
+    logging.info(f"Polling sync status for {activity_type} (max {SYNC_MAX_ATTEMPTS * max_wait}s)...")
     for attempt in range(SYNC_MAX_ATTEMPTS):
-        time.sleep(SYNC_WAIT_SECONDS)
-        poll_url = f"{BULK_SYNC_URL}/{sync_uri.split('/')[-1]}"
+        wait = min(2 * (2 ** attempt), max_wait)  # 2, 4, 8, 10, 10, 10 ...
+        time.sleep(wait)
+        total_waited += wait
         poll_resp = session.get(poll_url, headers=headers, timeout=HTTP_TIMEOUT_SHORT)
         poll_resp.raise_for_status()
         sync_status = poll_resp.json().get("status")
-        logging.info(f"  [{attempt+1}/{SYNC_MAX_ATTEMPTS}] Sync status: {sync_status}")
+        logging.info(f"  [{attempt+1}/{SYNC_MAX_ATTEMPTS}] +{wait}s (total {total_waited}s) status: {sync_status}")
         if sync_status == "success":
-            logging.info(f"✓ Sync completed for {activity_type}")
+            logging.info(f"✓ Sync completed for {activity_type} in {total_waited}s")
             break
         elif sync_status == "error":
             logging.error(f"✗ Sync failed for {activity_type}")
             return []
     else:
-        logging.error(f"✗ Sync timeout after {SYNC_MAX_ATTEMPTS * SYNC_WAIT_SECONDS}s for {activity_type}")
+        logging.error(f"✗ Sync timeout after {total_waited}s for {activity_type}")
         return []
 
     # Step 4: Download all data with pagination

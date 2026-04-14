@@ -5,16 +5,15 @@ import logging
 import os
 import json
 from core.aws.auth import get_valid_access_token
+from core.bulk.bulk_email_send import get_http_session
 from core.utils import save_json
 from config import *
-
-DEBUG_MODE = False
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-def smart_chunk_contacts(contact_ids, max_chars=1000):
+def smart_chunk_contacts(contact_ids, max_chars=30000):
     """
     Chunks a list of contact IDs into batches based on the Eloqua filter
     character limit, not a fixed number of IDs.
@@ -72,6 +71,7 @@ def fetch_contacts_bulk(contact_ids, batch_index=None):
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
+        session = get_http_session()
 
         export_payload = {
             "name": export_name,
@@ -79,73 +79,147 @@ def fetch_contacts_bulk(contact_ids, batch_index=None):
             "filter": filter_query
         }
 
-        save_payload_debug(export_payload, batch_index)
-        logging.info("Initiating export with filter: %s", filter_query)
+        logging.info("Creating contact export for %d IDs (batch %s)...", len(contact_ids), batch_index)
 
         # Step 1: Create export definition
-        export_resp = requests.post(BULK_CONTACT_EXPORT_URL, headers=headers, json=export_payload)
+        export_resp = session.post(BULK_CONTACT_EXPORT_URL, headers=headers, json=export_payload, timeout=HTTP_TIMEOUT_SHORT)
         export_resp.raise_for_status()
-        logging.info("Export created with status %s", export_resp.status_code)
         export_uri = export_resp.json().get("uri")
 
         # Step 2: Start sync
-        sync_resp = requests.post(BULK_SYNC_URL, headers=headers, json={"syncedInstanceUri": export_uri})
+        sync_resp = session.post(BULK_SYNC_URL, headers=headers, json={"syncedInstanceUri": export_uri}, timeout=HTTP_TIMEOUT_SHORT)
         sync_resp.raise_for_status()
         sync_uri = sync_resp.json().get("uri")
 
-        # Step 3: Poll sync status
+        # Step 3: Poll sync with exponential backoff (2s → 4s → 8s → cap at SYNC_WAIT_SECONDS)
+        max_wait = SYNC_WAIT_SECONDS
+        total_waited = 0
+        poll_url = f"{BULK_SYNC_URL}/{sync_uri.split('/')[-1]}"
         for attempt in range(SYNC_MAX_ATTEMPTS):
-            time.sleep(SYNC_WAIT_SECONDS)
-            poll_url = f"{BULK_SYNC_URL}/{sync_uri.split('/')[-1]}"
-            poll_resp = requests.get(poll_url, headers=headers)
+            wait = min(2 * (2 ** attempt), max_wait)
+            time.sleep(wait)
+            total_waited += wait
+            poll_resp = session.get(poll_url, headers=headers, timeout=HTTP_TIMEOUT_SHORT)
             poll_resp.raise_for_status()
-            if poll_resp.json().get("status") == "success":
-                logging.info("Sync completed successfully.")
+            status = poll_resp.json().get("status")
+            if status == "success":
+                logging.info("Contact sync completed in %ds (batch %s).", total_waited, batch_index)
                 break
+            elif status == "error":
+                logging.error("Contact sync failed (batch %s).", batch_index)
+                return []
+        else:
+            logging.error("Contact sync timed out after %ds (batch %s).", total_waited, batch_index)
+            return []
 
-        # Step 4: Download data
+        # Step 4: Paginated download
         sync_id = sync_uri.split("/")[-1]
-        data_url = f"{BASE_URL}/api/bulk/2.0/syncs/{sync_id}/data"
-        logging.info("Downloading from: %s", data_url)
-        download_headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/json"
-        }
-        
-        for attempt in range(API_RETRY_ATTEMPTS):
-            data_resp = requests.get(data_url, headers=download_headers)
-            if not data_resp.text.strip():
-                logging.warning("Attempt %d: Empty response, retrying...", attempt + 1)
-                time.sleep(API_RETRY_DELAY)
-                continue
+        base_data_url = f"{BASE_URL}/api/bulk/2.0/syncs/{sync_id}/data"
+        download_headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
 
-            try:
-                data = data_resp.json()
+        all_items = []
+        offset = 0
+        limit = 5000
+        while True:
+            paged_url = f"{base_data_url}?offset={offset}&limit={limit}"
+            data_resp = session.get(paged_url, headers=download_headers, timeout=HTTP_TIMEOUT_LONG)
+            if data_resp.status_code != 200:
+                logging.error("Failed to download contacts at offset %d: %s", offset, data_resp.text)
+                break
+            data = data_resp.json()
+            items = data.get("items", [])
+            all_items.extend(items)
+            if not data.get("hasMore"):
+                break
+            offset += limit
 
-                if DEBUG_MODE:
-                    output_dir = "debug_contact_data"
-                    os.makedirs(output_dir, exist_ok=True)
-                    filename = os.path.join(output_dir, f"bulk_contact_data_batch_{batch_index}.json")
-                    save_json(data, filename)
-
-                return data.get("items", [])
-
-            except json.JSONDecodeError as json_err:
-                logging.error("Attempt %d: JSON parse error: %s", attempt + 1, json_err)
-
-                if DEBUG_MODE:
-                    html_debug_file = f"debug_payloads/html_response_batch_{batch_index}.html"
-                    with open(html_debug_file, 'w', encoding='utf-8') as f:
-                        f.write(data_resp.text)
-                    logging.info("Saved HTML debug to: %s", html_debug_file)
-
-                time.sleep(API_RETRY_DELAY)
-
-        logging.error("All attempts failed for batch %s", batch_index)
-        return []
+        logging.info("Downloaded %d contacts (batch %s).", len(all_items), batch_index)
+        return all_items
 
     except Exception as e:
-        logging.exception("Error fetching contacts bulk: %s", e)
+        logging.exception("Error fetching contacts bulk (batch %s): %s", batch_index, e)
+        return []
+
+
+def fetch_all_contacts_bulk():
+    """
+    Export ALL contacts from Eloqua with no filter.
+    Used by warm_contact_cache.py to pre-populate the contact cache before a backfill.
+    Returns a list of contact dicts.
+    """
+    try:
+        access_token = get_valid_access_token()
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        session = get_http_session()
+
+        export_payload = {
+            "name": "Bulk_Contact_Export_All",
+            "fields": CONTACT_FIELDS,
+        }
+
+        logging.info("Creating full contact export (no filter)...")
+        export_resp = session.post(BULK_CONTACT_EXPORT_URL, headers=headers, json=export_payload, timeout=HTTP_TIMEOUT_SHORT)
+        export_resp.raise_for_status()
+        export_uri = export_resp.json().get("uri")
+
+        sync_resp = session.post(BULK_SYNC_URL, headers=headers, json={"syncedInstanceUri": export_uri}, timeout=HTTP_TIMEOUT_SHORT)
+        sync_resp.raise_for_status()
+        sync_uri = sync_resp.json().get("uri")
+        logging.info("Full contact sync started: %s", sync_uri)
+
+        # Poll with exponential backoff — full export can take several minutes
+        max_wait = 30  # allow longer waits for full export
+        total_waited = 0
+        poll_url = f"{BULK_SYNC_URL}/{sync_uri.split('/')[-1]}"
+        for attempt in range(60):  # up to ~15 minutes
+            wait = min(2 * (2 ** attempt), max_wait)
+            time.sleep(wait)
+            total_waited += wait
+            poll_resp = session.get(poll_url, headers=headers, timeout=HTTP_TIMEOUT_SHORT)
+            poll_resp.raise_for_status()
+            status = poll_resp.json().get("status")
+            print(f"  [{attempt+1}] +{wait}s (total {total_waited}s) status: {status}")
+            if status == "success":
+                logging.info("Full contact sync completed in %ds.", total_waited)
+                break
+            elif status == "error":
+                logging.error("Full contact sync failed.")
+                return []
+        else:
+            logging.error("Full contact sync timed out.")
+            return []
+
+        # Paginated download
+        sync_id = sync_uri.split("/")[-1]
+        base_data_url = f"{BASE_URL}/api/bulk/2.0/syncs/{sync_id}/data"
+        download_headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+
+        all_items = []
+        offset = 0
+        limit = 5000
+        while True:
+            paged_url = f"{base_data_url}?offset={offset}&limit={limit}"
+            data_resp = session.get(paged_url, headers=download_headers, timeout=HTTP_TIMEOUT_LONG)
+            if data_resp.status_code != 200:
+                logging.error("Failed to download contacts at offset %d: %s", offset, data_resp.text)
+                break
+            data = data_resp.json()
+            items = data.get("items", [])
+            all_items.extend(items)
+            print(f"  Downloaded {len(all_items)} contacts so far...")
+            if not data.get("hasMore"):
+                break
+            offset += limit
+
+        logging.info("Full contact export complete: %d contacts.", len(all_items))
+        return all_items
+
+    except Exception as e:
+        logging.exception("Error in fetch_all_contacts_bulk: %s", e)
         return []
 
 def batch_fetch_contacts_bulk(contact_ids, max_workers=20):

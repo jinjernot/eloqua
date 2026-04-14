@@ -18,3 +18,4 @@ logs/
 .env
 token.json
 auth_config.json
+cache

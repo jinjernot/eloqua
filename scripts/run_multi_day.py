@@ -11,9 +11,23 @@ from datetime import datetime, timedelta, timezone
 # Add parent directory to path to import core and config modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from core.logging_config import setup_logging
+
+# Setup logging with file output
+setup_logging("run_multi_day")
+
 from core.bulk.process_data_bulk import generate_daily_report
 from config import SAVE_LOCALLY, WEEKLY_REPORTS_DIR
 import logging
+
+# Automatically authenticate to AWS if needed
+if not SAVE_LOCALLY:
+    try:
+        from core.aws.auto_authenticate import ensure_authenticated
+        if not ensure_authenticated(auto_refresh=True, use_poetry=True):
+            print("\n✗ Unable to authenticate to AWS. Continuing with local save only...\n")
+    except Exception as e:
+        print(f"\n⚠ AWS authentication error: {e}. Continuing with local save only...\n")
 
 # Conditionally import S3 utils
 if not SAVE_LOCALLY:
@@ -23,12 +37,6 @@ if not SAVE_LOCALLY:
     except ImportError:
         logging.error("boto3 not installed. Install with: pip install boto3")
         sys.exit(1)
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
 
 def run_multi_day_reports(num_days=100):
     """
@@ -81,12 +89,12 @@ def run_multi_day_reports(num_days=100):
         print(f"\n{'─'*70}")
         print(f"[{i+1}/{num_days}] Processing {date_str}")
         print(f"{'─'*70}")
-        
+
         report_path = ""
         error_msg = ""
         status = "Failed"
         elapsed = 0
-        
+
         try:
             start_time = datetime.now()
             result = generate_daily_report(date_str)

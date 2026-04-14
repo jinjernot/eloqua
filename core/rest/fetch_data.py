@@ -88,16 +88,6 @@ def save_contact_cache(cache):
         print(f"[CACHE] Saved {len(cache)} contacts to compressed cache ({size_mb:.2f} MB)")
     except Exception as e:
         print(f"[CACHE] Warning: Could not save compressed cache: {e}")
-    
-    try:
-        backup_path = Path("data/cache/contact_cache.json")
-        with open(backup_path, 'w', encoding='utf-8') as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-        
-        backup_size_mb = backup_path.stat().st_size / (1024 * 1024)
-        print(f"[CACHE] Saved backup to uncompressed cache ({backup_size_mb:.2f} MB)")
-    except Exception as e:
-        print(f"[CACHE] Warning: Could not save backup cache: {e}")
 
 
 def fetch_contact_by_id(contact_id):
@@ -195,34 +185,60 @@ def fetch_contacts_batch(contact_ids, max_workers=None, use_cache=True):
         print(f"[CACHE] All contacts found in cache, no API calls needed!")
         return contacts
     
-    print(f"[API] Fetching {to_fetch_count} new contacts via API (this may take {to_fetch_count * REST_API_RATE_LIMIT_DELAY / 60:.1f} minutes)...")
-    
-    def fetch_with_delay(contact_id):
-        time.sleep(REST_API_RATE_LIMIT_DELAY)
-        result = fetch_contact_by_id(contact_id)
-        return contact_id, result
-    
-    newly_fetched = {}
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(fetch_with_delay, cid): cid for cid in contacts_to_fetch}
-        
-        completed = 0
-        for future in as_completed(futures):
-            completed += 1
-            if completed % 100 == 0:
-                print(f"[API] Progress: {completed}/{to_fetch_count} contacts fetched")
-            
-            try:
-                contact_id, contact_data = future.result()
-                if contact_data:
-                    cid_str = str(contact_id)
-                    contacts[cid_str] = contact_data
-                    newly_fetched[cid_str] = contact_data
-            except Exception as e:
-                print(f"[ERROR] Failed to fetch contact: {e}")
-    
-    print(f"[API] Successfully fetched {len(newly_fetched)}/{to_fetch_count} new contacts")
+    print(f"[API] Fetching {to_fetch_count} new contacts via API...")
+
+    # For large batches use the Bulk API (one sync job per ~900 contacts)
+    # For small batches keep individual REST calls (lower overhead than a sync job)
+    BULK_THRESHOLD = 50
+
+    if to_fetch_count > BULK_THRESHOLD:
+        from core.bulk.bulk_contacts import fetch_contacts_bulk, smart_chunk_contacts, build_contact_id_filter
+        chunks = smart_chunk_contacts(contacts_to_fetch)
+        print(f"[BULK] {to_fetch_count} contacts → {len(chunks)} bulk chunks")
+        newly_fetched = {}
+        for i, chunk in enumerate(chunks, 1):
+            items = fetch_contacts_bulk(chunk, batch_index=i)
+            for item in items:
+                cid = str(item.get("id", ""))
+                if cid:
+                    contact_data = {
+                        "emailAddress":  item.get("emailAddress", ""),
+                        "country":       item.get("country", ""),
+                        "hp_role":       item.get("hp_role", ""),
+                        "hp_partner_id": item.get("hp_partner_id", ""),
+                        "partner_name":  item.get("partner_name", ""),
+                        "market":        item.get("market", ""),
+                    }
+                    contacts[cid] = contact_data
+                    newly_fetched[cid] = contact_data
+        print(f"[BULK] Retrieved {len(newly_fetched)}/{to_fetch_count} contacts via Bulk API")
+    else:
+        def fetch_with_delay(contact_id):
+            time.sleep(REST_API_RATE_LIMIT_DELAY)
+            result = fetch_contact_by_id(contact_id)
+            return contact_id, result
+
+        newly_fetched = {}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(fetch_with_delay, cid): cid for cid in contacts_to_fetch}
+
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                if completed % 100 == 0:
+                    print(f"[API] Progress: {completed}/{to_fetch_count} contacts fetched")
+
+                try:
+                    contact_id, contact_data = future.result()
+                    if contact_data:
+                        cid_str = str(contact_id)
+                        contacts[cid_str] = contact_data
+                        newly_fetched[cid_str] = contact_data
+                except Exception as e:
+                    print(f"[ERROR] Failed to fetch contact: {e}")
+
+        print(f"[API] Successfully fetched {len(newly_fetched)}/{to_fetch_count} new contacts")
     
     # Update and save cache with newly fetched contacts
     if use_cache and newly_fetched:

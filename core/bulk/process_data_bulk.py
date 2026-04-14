@@ -3,6 +3,7 @@ import requests
 from dateutil import parser
 import logging
 import pandas as pd
+import numpy as np
 import csv
 import os
 from core.bulk.fetch_data_bulk import fetch_and_save_data
@@ -44,9 +45,6 @@ def optimize_dataframe_dtypes(df):
     # Downcast numeric types to smaller dtypes where possible
     for col in df.select_dtypes(include=['int64']).columns:
         df[col] = pd.to_numeric(df[col], downcast='integer')
-    
-    for col in df.select_dtypes(include=['float64']).columns:
-        df[col] = pd.to_numeric(df[col], downcast='float')
     
     return df
 
@@ -258,16 +256,14 @@ def generate_daily_report(target_date):
     if missing_campaign_id > 0:
         logger.info(f"Excluded {missing_campaign_id} sends without campaignId (non-standard eComm data)")
     
-    # CRITICAL FIX: Use list-based deduplication to preserve legitimate duplicate sends
-    # Problem: Dictionary-based dedup was removing duplicate sends when keys collided
-    # Solution: Only remove EXACT duplicates (all fields identical)
-    seen_sends = []
+    # Deduplicate sends: only remove EXACT duplicates (all fields identical).
+    # Using a set for O(1) membership checks instead of O(n) list search.
+    seen_sends = set()
     unique_sends_list = []
     na34078_debug = []
     
     for s in email_sends_filtered:
-        # Debug NA_34078 (email ID 18010)
-        if str(s.get("assetId")) == "18010":
+        if VERBOSE_DEBUG and str(s.get("assetId")) == "18010":
             na34078_debug.append({
                 'contactId': s.get("contactId"),
                 'externalId': s.get("externalId"),
@@ -275,8 +271,6 @@ def generate_daily_report(target_date):
                 'emailAddress': s.get("emailAddress")
             })
         
-        # Create a signature for exact duplicate detection
-        # Include ALL relevant fields to ensure only TRUE duplicates are removed
         signature = (
             str(s.get("externalId")),
             str(s.get("assetId")),
@@ -287,48 +281,25 @@ def generate_daily_report(target_date):
             str(s.get("emailAddress"))
         )
         
-        # Only skip if we've seen this EXACT send before
         if signature not in seen_sends:
-            seen_sends.append(signature)
+            seen_sends.add(signature)
             unique_sends_list.append(s)
     
-    # Debug output for NA_34078
-    if len(na34078_debug) > 0:
-        print(f"\n[NA_34078 DEBUG] Total sends before dedup: {len(na34078_debug)}")
+    if VERBOSE_DEBUG and na34078_debug:
         contact_groups = {}
         for item in na34078_debug:
-            cid = item['contactId']
-            if cid not in contact_groups:
-                contact_groups[cid] = []
-            contact_groups[cid].append(item)
-        
+            contact_groups.setdefault(item['contactId'], []).append(item)
         multi_send_contacts = {k: v for k, v in contact_groups.items() if len(v) > 1}
-        print(f"[NA_34078 DEBUG] Contacts with multiple sends: {len(multi_send_contacts)}")
-        
-        # Check externalId availability
-        has_external_id = sum(1 for item in na34078_debug if item['externalId'] is not None and item['externalId'] != '')
-        print(f"[NA_34078 DEBUG] Sends with externalId: {has_external_id}/{len(na34078_debug)}")
-        
-        if len(multi_send_contacts) > 0:
-            print(f"[NA_34078 DEBUG] Sample multi-send contacts:")
-            for cid, sends in list(multi_send_contacts.items())[:3]:
-                print(f"  Contact {cid} ({sends[0]['emailAddress']}): {len(sends)} sends")
-                for send in sends:
-                    print(f"    - {send['activityDate']} | externalId={send['externalId']}")
-        print()
+        has_external_id = sum(1 for item in na34078_debug if item['externalId'] not in (None, ''))
+        print(f"[NA_34078 DEBUG] {len(na34078_debug)} sends, {len(multi_send_contacts)} multi-send contacts, {has_external_id} with externalId")
 
-    print(f"[DEBUG] Deduplication complete: {len(unique_sends_list)} unique sends (was {len(email_sends_filtered)} before dedup)")
-    na34078_after_dedup = sum(1 for s in unique_sends_list if str(s.get('assetId')) == '18010')
-    print(f"[DEBUG] NA_34078 after dedup: {na34078_after_dedup} rows")
+    debug_print(f"[DEBUG] Deduplication complete: {len(unique_sends_list)} unique sends (was {len(email_sends_filtered)} before dedup)")
     
     df_sends = pd.DataFrame(unique_sends_list)
     
     # Optimize memory usage before processing
     df_sends = optimize_dataframe_dtypes(df_sends)
     
-    print(f"[DEBUG] After DataFrame creation: df_sends has {len(df_sends)} rows")
-    na34078_after_dedup = len(df_sends[df_sends['assetId'] == '18010'])
-    print(f"[DEBUG] NA_34078 after DataFrame: {na34078_after_dedup} rows")
     
     # Log emailSendType distribution
     if "emailSendType" in df_sends.columns:
@@ -439,9 +410,7 @@ def generate_daily_report(target_date):
                 # Parse sentDateHour keeping local timezone (don't convert to UTC)
                 # sentDateHour format: "2026-01-13T02:00:00-05:00" → keep "2026-01-13 02:00:00" (local time)
                 # This matches activityDate which is also in local time without timezone
-                df_clicks['sentDateParsed'] = df_clicks['sentDateHour'].apply(
-                    lambda x: pd.to_datetime(str(x)[:19], errors='coerce') if pd.notna(x) else pd.NaT
-                )
+                df_clicks['sentDateParsed'] = pd.to_datetime(df_clicks['sentDateHour'].astype(str).str[:19], errors='coerce')
                 # Floor (truncate) to hour to match Eloqua's sentDateHour rounding behavior (rounds DOWN not nearest)
                 df_clicks['sentDateRounded'] = df_clicks['sentDateParsed'].dt.floor('H')
                 click_key = ["assetId_str", "contactId_str", "sentDateRounded"]
@@ -519,9 +488,7 @@ def generate_daily_report(target_date):
                 # Parse sentDateHour keeping local timezone (don't convert to UTC)
                 # sentDateHour format: "2026-01-13T02:00:00-05:00" → parse first 19 chars to get "2026-01-13 02:00:00"
                 # This matches activityDate which is also in local time without timezone
-                df_opens['sentDateParsed'] = df_opens['sentDateHour'].apply(
-                    lambda x: pd.to_datetime(str(x)[:19], errors='coerce') if pd.notna(x) else pd.NaT
-                )
+                df_opens['sentDateParsed'] = pd.to_datetime(df_opens['sentDateHour'].astype(str).str[:19], errors='coerce')
                 # Floor (truncate) to hour to match Eloqua's sentDateHour rounding behavior (rounds DOWN not nearest)
                 df_opens['sentDateRounded'] = df_opens['sentDateParsed'].dt.floor('H')
                 open_key = ["assetId_str", "contactId_str", "sentDateRounded"]
@@ -566,10 +533,10 @@ def generate_daily_report(target_date):
             df_opens['openDateHour'] = pd.to_datetime(df_opens['openDateHour'], errors='coerce', utc=True)
             
             # Group by merge key (includes sentDateRounded if available) and get total opens + first open timestamp
-            df_open_agg = df_opens.groupby(open_key).agg({
-                'openDateHour': 'min',  # Get earliest open timestamp
-            }).reset_index()
-            df_open_agg['total_opens'] = df_opens.groupby(open_key).size().values
+            df_open_agg = df_opens.groupby(open_key).agg(
+                openDateHour=('openDateHour', 'min'),
+                total_opens=('openDateHour', 'size'),
+            ).reset_index()
             # Strip timezone for comparison (already converted to datetime before aggregation)
             df_open_agg['firstOpenDate'] = df_open_agg['openDateHour'].dt.tz_localize(None)
             
@@ -745,9 +712,8 @@ def generate_daily_report(target_date):
 
     # Filter out excluded campaigns from sends
     pd_step_start = time.time()
-    df_sends['assetId_int'] = pd.to_numeric(df_sends['assetId'], errors='coerce')
     initial_count = len(df_sends)
-    df_sends = df_sends[~df_sends['assetId_int'].astype(str).isin(EXCLUDED_CAMPAIGN_IDS)]
+    df_sends = df_sends[~df_sends['assetId'].astype(str).isin(EXCLUDED_CAMPAIGN_IDS)]
     excluded_count = initial_count - len(df_sends)
     if excluded_count > 0:
         logger.info(f"Excluded {excluded_count} sends from filtered campaigns")
@@ -1181,78 +1147,45 @@ def generate_daily_report(target_date):
         contact = contact_lookup.get(str(contact_id), {})
         return contact.get(field_name, "")
     
-    # Restore proper email case from contact_lookup (Bulk API returns lowercase, but we want original case)
-    df_sends["emailAddress"] = df_sends.apply(
-        lambda row: get_contact_field(row["contactId_str"], "emailAddress") or row["emailAddress"],
-        axis=1
-    )
-    debug_print(f"[PERF_DEBUG] Restored proper email case from contact lookup.")
-    
-    # Add contact country and other fields from contact_lookup
-    df_sends["contact_country"] = df_sends["contactId_str"].apply(lambda cid: get_contact_field(cid, "contact_country"))
-    df_sends["contact_hp_role"] = df_sends["contactId_str"].apply(lambda cid: get_contact_field(cid, "contact_hp_role"))
-    df_sends["contact_hp_partner_id"] = df_sends["contactId_str"].apply(lambda cid: get_contact_field(cid, "contact_hp_partner_id"))
-    df_sends["contact_partner_name"] = df_sends["contactId_str"].apply(lambda cid: get_contact_field(cid, "contact_partner_name"))
-    df_sends["contact_market"] = df_sends["contactId_str"].apply(lambda cid: get_contact_field(cid, "contact_market"))
-    debug_print(f"[PERF_DEBUG] Added contact data from contact_lookup.")
+    # Build per-field lookup dicts from contact_lookup once, then use fast .map() instead of per-row apply()
+    _email_map    = {cid: d.get('emailAddress', '')    for cid, d in contact_lookup.items()}
+    _country_map  = {cid: d.get('contact_country', '') for cid, d in contact_lookup.items()}
+    _role_map     = {cid: d.get('contact_hp_role', '')  for cid, d in contact_lookup.items()}
+    _pid_map      = {cid: d.get('contact_hp_partner_id', '') for cid, d in contact_lookup.items()}
+    _pname_map    = {cid: d.get('contact_partner_name', '')  for cid, d in contact_lookup.items()}
+    _market_map   = {cid: d.get('contact_market', '')  for cid, d in contact_lookup.items()}
+
+    # Restore proper email case (Bulk API returns lowercase)
+    mapped_email = df_sends["contactId_str"].map(_email_map)
+    df_sends["emailAddress"] = mapped_email.where(mapped_email.notna() & (mapped_email != ''), df_sends["emailAddress"])
+    df_sends["contact_country"]       = df_sends["contactId_str"].map(_country_map).fillna('')
+    df_sends["contact_hp_role"]       = df_sends["contactId_str"].map(_role_map).fillna('')
+    df_sends["contact_hp_partner_id"] = df_sends["contactId_str"].map(_pid_map).fillna('')
+    df_sends["contact_partner_name"]  = df_sends["contactId_str"].map(_pname_map).fillna('')
+    df_sends["contact_market"]        = df_sends["contactId_str"].map(_market_map).fillna('')
+    debug_print(f"[PERF_DEBUG] Added contact data via vectorized map().")
 
     df_sends["Email Group"] = df_sends["assetId_int"].map(email_group_map).fillna("")
     
-    # For forwarded emails, Total Sends and Total Delivered should be blank/0
-    df_sends["Total Sends"] = df_sends["emailSendType"].apply(lambda x: 0 if x in ["Forwarded", "EmailForward"] else 1)
-    df_sends["Total Delivered"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] else (1 if row["total_bb"] == 0 else 0), 
-        axis=1
-    )
-    
-    df_sends["Unique Opens"] = (df_sends["total_opens"] > 0).astype(int)
+    # Vectorized flag/rate calculations — replaces 9 row-by-row apply() calls
+    is_fwd = df_sends["emailSendType"].isin(["Forwarded", "EmailForward"])
+
+    df_sends["Total Sends"]     = (~is_fwd).astype(int)
+    df_sends["Total Delivered"] = np.where(is_fwd, 0, np.where(df_sends["total_bb"] == 0, 1, 0))
+
+    df_sends["Unique Opens"]  = (df_sends["total_opens"] > 0).astype(int)
     df_sends["Unique Clicks"] = (df_sends["total_clicks"] > 0).astype(int)
-    
-    # Rate calculations per Oracle Eloqua documentation:
-    # - Bounceback rates: Metric / Total Sends * 100
-    # - Other rates (Open, Click, Delivered): Metric / Total Delivered * 100
-    # - Forwards have 0 for all rates (no send = no rate)
-    
-    # Bounceback rates use Total Sends as denominator
-    df_sends["Hard Bounceback Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Sends"] == 0 
-                    else (row["hard"] / row["Total Sends"]) * 100,
-        axis=1
-    )
-    df_sends["Soft Bounceback Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Sends"] == 0
-                    else (row["soft"] / row["Total Sends"]) * 100,
-        axis=1
-    )
-    df_sends["Bounceback Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Sends"] == 0
-                    else (row["total_bb"] / row["Total Sends"]) * 100,
-        axis=1
-    )
-    
-    # Delivered Rate uses Total Sends as denominator: (Total Sends - Total Bouncebacks) / Total Sends
-    df_sends["Delivered Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Sends"] == 0
-                    else (row["Total Delivered"] / row["Total Sends"]) * 100,
-        axis=1
-    )
-    
-    # Open and Click rates use Total Delivered as denominator (per Oracle documentation)
-    df_sends["Unique Open Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Delivered"] == 0
-                    else (row["Unique Opens"] / row["Total Delivered"]) * 100,
-        axis=1
-    )
-    df_sends["Clickthrough Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Delivered"] == 0
-                    else (row["total_clicks"] / row["Total Delivered"]) * 100,
-        axis=1
-    )
-    df_sends["Unique Clickthrough Rate"] = df_sends.apply(
-        lambda row: 0 if row["emailSendType"] in ["Forwarded", "EmailForward"] or row["Total Delivered"] == 0
-                    else (row["Unique Clicks"] / row["Total Delivered"]) * 100,
-        axis=1
-    )
+
+    s = df_sends["Total Sends"].astype(float).replace(0, np.nan)
+    d = df_sends["Total Delivered"].astype(float).replace(0, np.nan)
+
+    df_sends["Hard Bounceback Rate"]      = np.where(is_fwd, 0, (df_sends["hard"]          / s * 100).fillna(0))
+    df_sends["Soft Bounceback Rate"]      = np.where(is_fwd, 0, (df_sends["soft"]          / s * 100).fillna(0))
+    df_sends["Bounceback Rate"]           = np.where(is_fwd, 0, (df_sends["total_bb"]      / s * 100).fillna(0))
+    df_sends["Delivered Rate"]            = np.where(is_fwd, 0, (df_sends["Total Delivered"].astype(float) / s * 100).fillna(0))
+    df_sends["Unique Open Rate"]          = np.where(is_fwd, 0, (df_sends["Unique Opens"]  / d * 100).fillna(0))
+    df_sends["Clickthrough Rate"]         = np.where(is_fwd, 0, (df_sends["total_clicks"]  / d * 100).fillna(0))
+    df_sends["Unique Clickthrough Rate"]  = np.where(is_fwd, 0, (df_sends["Unique Clicks"] / d * 100).fillna(0))
     debug_print(f"[PERF_DEBUG] Step 7: Final logic and calculations applied in {time.time() - pd_step_start:.2f}s.")
 
     pd_step_start = time.time()
